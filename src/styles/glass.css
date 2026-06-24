@@ -1,0 +1,105 @@
+/* ─── ORCH Glass UI System ───────────────────────────────────── */
+
+/* Frosted glass panel */
+.glass {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  transition: background var(--anim-normal);
+}
+
+.glass:hover {
+  background: var(--glass-hover);
+}
+
+.glass-active {
+  background: var(--glass-active) !important;
+}
+
+/* Stronger glass for modals/dialogs */
+.glass-strong {
+  background: var(--glass-active);
+  border: 1px solid var(--glass-border);
+}
+
+/* Glass with accent glow border */
+.glass-accent {
+  background: var(--glass-bg);
+  border: 1px solid var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+
+/* Glass button */
+.glass-btn {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  cursor: pointer;
+  padding: var(--spacing-sm) var(--spacing-md);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  transition: all var(--anim-fast);
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.glass-btn:hover {
+  background: var(--glass-hover);
+  border-color: var(--accent);
+}
+
+.glass-btn:active {
+  background: var(--glass-active);
+  transform: scale(0.97);
+}
+
+/* Glass input */
+.glass-input {
+  background: var(--glass-active);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  padding: var(--spacing-sm) var(--spacing-md);
+  outline: none;
+  transition: all var(--anim-fast);
+  font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+  font-size: 13px;
+  width: 100%;
+}
+
+.glass-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+
+.glass-input::placeholder {
+  color: var(--text-muted);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--glass-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-dim);
+}
+
+/* Selection */
+::selection {
+  background: var(--accent);
+  color: white;
+}

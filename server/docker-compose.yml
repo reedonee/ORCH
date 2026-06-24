@@ -1,0 +1,68 @@
+# ── ORCH Hybrid Cloud Stack ────────────────────────────────────
+# Deploys: Caddy (SSL), agent-core (FastAPI), Qdrant (vector DB), Ollama (LLM)
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    networks:
+      - orch-net
+
+  agent-core:
+    build:
+      context: ./agent-core
+      dockerfile: Dockerfile
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_HOST=http://ollama:11434
+      - MODEL=qwen2.5-coder:7b
+      - WHISPER_MODEL=base
+      - LOG_LEVEL=info
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - whisper_cache:/root/.cache/whisper
+      - kokoro_models:/app/kokoro_models
+    restart: unless-stopped
+    depends_on:
+      - qdrant
+      - ollama
+    networks:
+      - orch-net
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+    networks:
+      - orch-net
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - orch-net
+    # Pull model on startup
+    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 3 && ollama pull qwen2.5-coder:7b && tail -f /dev/null"]
+
+networks:
+  orch-net:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:
+  qdrant_storage:
+  ollama_models:
+  whisper_cache:
+  kokoro_models:

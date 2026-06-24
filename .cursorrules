@@ -1,0 +1,41 @@
+# ── ORCH Cloud MCP ─────────────────────────────────────────────────
+# This file enables automatic MCP server discovery.
+# External IDE agents (Claude Code, Cursor, etc.) read this to
+# connect to ORCH's VPS-hosted tool server.
+
+ORCH MCP Server:
+  description: "ORCH's VPS-hosted Model Context Protocol server with filesystem, sandbox, and vector memory tools"
+  transport: "http"
+  base_url: "http://51.170.134.197:8000"
+  endpoints:
+    list_tools:
+      method: GET
+      path: /api/mcp/tools
+      description: "Returns all available tools with JSON schemas"
+    call_tool:
+      method: POST
+      path: /api/mcp/call?name={tool_name}
+      body:
+        arguments: {}
+      description: "Execute a tool by name with arguments"
+  tools:
+    - read_file
+    - write_file
+    - search_files
+    - sandbox_exec
+    - memory_search
+    - memory_store
+    - agent_think
+  terminals:
+    - create: POST /api/agents/{id}/terminal (body: {"tool": "claude"})
+    - read: GET /api/agents/{id}/terminal
+    - write: POST /api/agents/{id}/terminal/input (body: {"text": "..."})
+    - list: GET /api/sessions
+  workspace: /workspace/
+  pre_installed:
+    - claude v2.1.185 (/usr/bin/claude)
+    - codex v0.141.0 (/usr/bin/codex)
+    - hermes v0.17.0 (/usr/local/bin/hermes)
+    - opencode v1.17.9 (/usr/bin/opencode)
+    - Node.js 20 LTS
+    - tmux 3.5a

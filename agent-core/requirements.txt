@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+websockets
+httpx
+qdrant-client
+mcp
+docker
+kokoro-onnx
+huggingface-hub
