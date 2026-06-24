@@ -103,9 +103,10 @@ export const VpsTerminal: React.FC<VpsTerminalProps> = ({ agentId, onSessionEnde
       if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'V') {
         navigator.clipboard.readText().then((text) => {
           if (text) {
+            const trimmed = text.trim();
             const ws = socketRef.current;
             if (ws?.readyState === WebSocket.OPEN)
-              ws.send(JSON.stringify({ event: 'input', data: text }));
+              ws.send(JSON.stringify({ event: 'input', data: trimmed }));
           }
         }).catch(() => {});
         return false;
@@ -239,9 +240,10 @@ export const VpsTerminal: React.FC<VpsTerminalProps> = ({ agentId, onSessionEnde
       const text = e.clipboardData?.getData('text/plain');
       if (text) {
         e.preventDefault();
+        const trimmed = text.trim();
         const ws = socketRef.current;
         if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ event: 'input', data: text }));
+          ws.send(JSON.stringify({ event: 'input', data: trimmed }));
         }
       }
     };

@@ -101,11 +101,9 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
       if (cancelled) return;
       setReady(ok);
       if (ok) {
-        console.log('[Voice] Server ready, calling voiceStartListening()');
         try { await voiceStartListening(); } catch (e) {
           console.warn('[Voice] startListening failed:', e);
         }
-        console.log('[Voice] voiceStartListening() completed');
       }
     };
     // Check immediately AND poll every 2s — both must call voiceStartListening()
