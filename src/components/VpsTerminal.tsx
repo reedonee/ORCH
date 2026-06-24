@@ -99,7 +99,7 @@ export const VpsTerminal: React.FC<VpsTerminalProps> = ({ agentId, onSessionEnde
         if (sel) navigator.clipboard.writeText(sel).catch(() => {});
         return false;
       }
-      // Paste: Ctrl+Shift+V
+      // Paste: Ctrl+Shift+V (explicit terminal paste shortcut)
       if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'V') {
         navigator.clipboard.readText().then((text) => {
           if (text) {
@@ -108,6 +108,11 @@ export const VpsTerminal: React.FC<VpsTerminalProps> = ({ agentId, onSessionEnde
               ws.send(JSON.stringify({ event: 'input', data: text }));
           }
         }).catch(() => {});
+        return false;
+      }
+      // Block raw Ctrl+V from sending \x16 to terminal — paste is handled
+      // by the DOM paste event listener on the container div
+      if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && e.key === 'v') {
         return false;
       }
       return true;

@@ -132,7 +132,12 @@ export function createBridge(): BridgeAPI {
             .replace(/^-|-$/g, '')
             || `ws-${Date.now()}`;
           try {
-            const result = await vpsClient.createTerminal(agentId, provider.command, workspaceId);
+            // Inject saved API keys as env vars before the tool command
+            const envPrefix = Object.keys(env).length > 0
+              ? Object.entries(env).map(([k, v]) => `export ${k}=${v}`).join(' && ') + ' && '
+              : '';
+            const cmd = `${envPrefix}${provider.command}`;
+            const result = await vpsClient.createTerminal(agentId, cmd, workspaceId);
             if (result.created) {
               termId = agentId; // VPS sessions use agent_id as the terminal identifier
             } else {

@@ -112,11 +112,15 @@ export const CliTerminal: React.FC<CliTerminalProps> = ({ sessionId }) => {
         if (sel) navigator.clipboard.writeText(sel).catch(() => {});
         return false;
       }
-      // Paste: Ctrl+Shift+V
+      // Paste: Ctrl+Shift+V (explicit terminal paste shortcut)
       if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'V') {
         navigator.clipboard.readText().then((text) => {
           if (text) sendToPty(text);
         }).catch(() => {});
+        return false;
+      }
+      // Block raw Ctrl+V from sending \x16 — paste is handled by DOM
+      if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && e.key === 'v') {
         return false;
       }
       if (e.type === 'keydown' && e.ctrlKey && e.key === 'o') {
