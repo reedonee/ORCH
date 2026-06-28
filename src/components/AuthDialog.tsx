@@ -12,6 +12,7 @@ import { X, Mail, Lock, CloudOff } from 'lucide-react';
 import { GoogleIcon } from './icons/GoogleIcon';
 import { AppLogo } from './icons/AppLogo';
 import { supabase } from '../lib/supabase';
+import { openAuthUrl, onAuthCallback } from '../lib/electron-api';
 
 // ── Fusion palette ─────────────────────────────────────────────────
 const OBSIDIAN_VOID = '#050304';
@@ -115,6 +116,29 @@ export const AuthDialog: React.FC<AuthDialogProps> = ({ onClose = () => {}, mode
     setPassword('');
     clearError();
   }, [clearError]);
+
+  // ── Listen for OAuth callback via orch:// protocol ─────────
+  useEffect(() => {
+    const unsub = onAuthCallback(async ({ code }) => {
+      if (!supabase || !code) return;
+      setLoginState('loading');
+      setSubmitting(true);
+      try {
+        const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+        if (error) throw error;
+        if (data.session) {
+          useAuthStore.getState().initialize(); // re-sync session
+          setLoginState('success');
+          setTimeout(() => { if (!isGate) onClose(); }, 2000);
+        }
+      } catch (err: any) {
+        setErrorMsg(err.message || 'OAuth failed');
+        setLoginState('error');
+        setSubmitting(false);
+      }
+    });
+    return unsub;
+  }, [isGate, onClose]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -428,10 +452,20 @@ export const AuthDialog: React.FC<AuthDialogProps> = ({ onClose = () => {}, mode
             <button type="button" onClick={async () => {
               if (!supabase) return;
               try {
-                const { error } = await supabase.auth.signInWithOAuth({
-                  provider: 'google', options: { redirectTo: window.location.origin },
+                const { data, error } = await supabase.auth.signInWithOAuth({
+                  provider: 'google',
+                  options: {
+                    redirectTo: 'orch://auth/callback',
+                    skipBrowserRedirect: true,
+                  },
                 });
                 if (error) throw error;
+                if (data?.url) {
+                  const result = await openAuthUrl(data.url);
+                  if (!result.success) {
+                    setErrorMsg('Failed to open browser. Check your default browser settings.');
+                  }
+                }
               } catch (err: any) { console.error('Google OAuth error:', err); }
             }} style={{
               width: '100%', padding: '11px 0', fontSize: 13, fontWeight: 600,

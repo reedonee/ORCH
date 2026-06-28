@@ -241,7 +241,7 @@ export function setupBridge() {
   setTimeout(() => {
     const settings = useSettingsStore.getState();
     const specs = settings.providers
-      .filter((p) => p.id !== 'cursor' && !p.shell)
+      .filter((p) => !p.shell)
       .map((p) => ({ id: p.id, name: p.name, command: p.command, args: p.args }));
     if (specs.length) {
       useProviderStore.getState().probeAll(specs);

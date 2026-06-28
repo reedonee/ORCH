@@ -360,7 +360,7 @@ const AgentsSection: React.FC = () => {
 
   useEffect(() => {
     const specs = providers
-      .filter((p) => p.id !== 'cursor')
+      .filter((p) => !p.shell)
       .map((p) => ({ id: p.id, name: p.name, command: p.command, args: p.args }));
     if (specs.length) {
       useProviderStore.getState().probeAll(specs).then(() => {
@@ -396,7 +396,7 @@ const AgentsSection: React.FC = () => {
     }
   };
 
-  const agentProviders = providers.filter((p) => !p.shell && p.id !== 'cursor');
+  const agentProviders = providers.filter((p) => !p.shell);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>

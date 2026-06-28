@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -175,6 +175,7 @@ function createWindow() {
     frame: false,
     transparent: false,
     backgroundColor: '#0E1A14',
+    title: 'ORCH - Agentic OS',
     icon: icon,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -1340,6 +1341,68 @@ ipcMain.handle('trigger-update', async () => {
     mainWindow?.webContents.send('update-status', {
       status: 'idle', version: null, percent: 0,
     });
+    return { success: false, error: err.message };
+  }
+});
+
+// ── Custom Protocol (orch://) for OAuth callbacks ────────────────
+// Registers the orch:// scheme so Google OAuth can redirect back
+// to the desktop app after authentication.
+
+const ORCH_PROTOCOL = 'orch';
+
+if (!app.isPackaged) {
+  // Dev mode: register on first instance only
+  app.setAsDefaultProtocolClient(ORCH_PROTOCOL);
+} else {
+  // Production: register after app is ready
+  app.setAsDefaultProtocolClient(ORCH_PROTOCOL);
+}
+
+// Handle protocol URL on Windows (second-instance event)
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv) => {
+    // Windows sends protocol URLs as command-line args to the second instance
+    const url = argv.find((arg) => arg.startsWith(`${ORCH_PROTOCOL}://`));
+    if (url) handleAuthCallback(url);
+    // Focus the existing window
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
+// Handle protocol URL on macOS
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  if (url.startsWith(`${ORCH_PROTOCOL}://`)) {
+    handleAuthCallback(url);
+  }
+});
+
+/** Extract auth code from orch://auth/callback?code=... and forward to renderer */
+function handleAuthCallback(url: string) {
+  try {
+    const parsed = new URL(url);
+    const code = parsed.searchParams.get('code');
+    if (code && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('orch-auth-callback', { code });
+    }
+  } catch (err) {
+    console.warn('[Auth] Failed to parse callback URL:', url);
+  }
+}
+
+// ── IPC: Open system browser for OAuth ────────────────────────────
+ipcMain.handle('open-auth-url', async (_event, { url }: { url: string }) => {
+  try {
+    await shell.openExternal(url);
+    return { success: true };
+  } catch (err: any) {
     return { success: false, error: err.message };
   }
 });

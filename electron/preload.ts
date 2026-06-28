@@ -77,4 +77,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('update-status', handler);
     return () => ipcRenderer.removeListener('update-status', handler);
   },
+
+  // ── OAuth (Custom Protocol) ────────────────────────────
+  openAuthUrl: (url: string) => ipcRenderer.invoke('open-auth-url', { url }),
+  onAuthCallback: (callback: (payload: { code: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: any) => callback(data);
+    ipcRenderer.on('orch-auth-callback', handler);
+    return () => ipcRenderer.removeListener('orch-auth-callback', handler);
+  },
 });

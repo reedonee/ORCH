@@ -50,6 +50,9 @@ declare global {
     checkForUpdates: () => Promise<{ success: boolean; updateInfo?: any; error?: string }>;
     triggerUpdate: () => Promise<{ success: boolean; error?: string }>;
     onUpdateStatus: (callback: (payload: { status: string; version: string | null; percent: number }) => void) => () => void;
+    // ── OAuth ─────────────────────────────────────────────
+    openAuthUrl: (url: string) => Promise<{ success: boolean; error?: string }>;
+    onAuthCallback: (callback: (payload: { code: string }) => void) => () => void;
   }
 }
 
@@ -354,4 +357,16 @@ export function onUpdateStatus(
 ): () => void {
   if (!api?.onUpdateStatus) return () => {};
   return api.onUpdateStatus(cb);
+}
+
+// ── OAuth wrappers ────────────────────────────────────────────────
+
+export function openAuthUrl(url: string): Promise<{ success: boolean; error?: string }> {
+  if (!api?.openAuthUrl) return Promise.resolve({ success: false, error: 'no bridge' });
+  return api.openAuthUrl(url);
+}
+
+export function onAuthCallback(cb: (payload: { code: string }) => void): () => void {
+  if (!api?.onAuthCallback) return () => {};
+  return api.onAuthCallback(cb);
 }
