@@ -68,5 +68,7 @@ New: src/lib/layout-engine.ts Refactored: src/stores/useWorkspaceStore.ts Rewire
 
 This is a single-shot, architecture-level fix that makes the arranging system deterministic, unified, and world-class.
 
-
 git stash apply 92e9185d4a5017b6466bf95d454e197ca7756d07
+
+navigate to C:\Users\hp\Desktop\red\create\ORCH (electron) and oneshot this plan, you may find some files changed and some new nodes on the app, please include them in the smart layout engine, and please consider that we have limited tokens so please finish this with less token consumption possible, 
+

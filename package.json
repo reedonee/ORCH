@@ -57,6 +57,7 @@
     "directories": {
       "output": "release"
     },
+    "nodeGypRebuild": false,
     "files": [
       "dist/**/*",
       "dist-electron/**/*"
