@@ -118,6 +118,8 @@ export const VectorLayer: React.FC<VectorLayerProps> = ({ pan, zoom }) => {
       onMouseLeave: () => { if (hoveredId === el.id) setHoveredId(null); },
       onMouseDown: canDragShape ? (e: React.MouseEvent) => {
         e.stopPropagation();
+        // Also select the shape in select mode
+        useCanvasStore.getState().setSelectedElementIds([el.id]);
         // Claim drag target
         const targetId = `shape:${el.id}`;
         setDragTarget(targetId);
@@ -177,6 +179,9 @@ export const VectorLayer: React.FC<VectorLayerProps> = ({ pan, zoom }) => {
         const dy = Math.abs(dragCurrent.y - dragStart.y);
         if (dx < 5 && dy < 5) {
           useCanvasStore.getState().removeElement(previewId);
+        } else {
+          // Auto-return to select after shape creation
+          useCanvasStore.getState().setActiveTool('select');
         }
         setDragStart(null);
         setDragCurrent(null);

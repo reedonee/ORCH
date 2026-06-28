@@ -1,7 +1,4 @@
-import { invoke } from './electron-api';
-import { vpsClient } from './vps-client';
 import { pickAgentName } from './agent-names';
-import { findViewportPosition, snapToGrid, autoLayout } from './canvas-utils';
 import { LAYOUT_ENGINE_SPEC, useWorkspaceStore } from '../stores/useWorkspaceStore';
 import { useAppStore, type Agent } from '../stores/useAppStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
@@ -10,13 +7,6 @@ import type { LayoutMode } from '../stores/useWorkspaceStore';
 
 const AGENT_COLORS = ['#F4A261', '#4EA8DE', '#6BBF8A', '#E76F51', '#B48BC9', '#F4C97A', '#7BC9C9', '#EAF4F4'];
 const AGENT_ROLES = ['Developer', 'Terminal', 'File System', 'Debugger', 'Compiler', 'Network', 'Database', 'Observer'];
-const VPS_TOOLS: Record<string, string> = {
-  'claude-code': 'claude',
-  'codex': 'codex',
-  'hermes': 'hermes',
-  'opencode': 'opencode',
-  'cursor': 'agent',
-};
 
 export type AppCommandResult = { ok: boolean; message: string; agentId?: string; terminalId?: string };
 
@@ -61,6 +51,7 @@ export async function spawnProviderAgent(providerId: string, count = 1, explicit
 
   let lastAgentId: string | undefined;
   let lastTerminalId: string | undefined;
+  const spawnedNames: string[] = [];
 
   for (let i = 0; i < Math.min(Math.max(count, 1), 4); i++) {
     const agents = useAppStore.getState().agents;
@@ -68,44 +59,39 @@ export async function spawnProviderAgent(providerId: string, count = 1, explicit
     const role = AGENT_ROLES[agents.length % AGENT_ROLES.length];
     const color = AGENT_COLORS[agents.length % AGENT_COLORS.length];
     const env = buildProviderEnv(provider);
-    const launchMode = provider.launchMode ?? 'embedded';
     const kind = provider.shell === false ? 'cli' : 'shell';
     let termId: string | null = null;
 
-    const vpsTool = VPS_TOOLS[providerId];
-    if (vpsTool) {
-      const vpsId = `${providerId}-${Date.now()}-${i}`;
-      const envPrefix = Object.keys(env).length > 0 ? Object.entries(env).map(([k, v]) => `export ${k}=${v}`).join(' && ') + ' && ' : '';
-      const workspacePath = useWorkspaceStore.getState().currentWorkspacePath;
-      // Derive workspace_id matching the file sync derivation in useWorkspaceFileSync.ts
-      const folderName = workspacePath ? workspacePath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() : 'workspace';
-      const workspaceId = (folderName || 'workspace')
-        .toLowerCase()
-        .replace(/[^a-z0-9_-]/g, '-')
-        .replace(/-+/g, '-')
-        .replace(/^-|-$/g, '')
-        || `ws-${Date.now()}`;
-      const result = await vpsClient.createTerminal(vpsId, `${envPrefix}${vpsTool}`, workspaceId);
-      if (result.created) termId = `vps:${vpsId}`;
-    } else if (launchMode === 'embedded') {
-      termId = await terminalStore.createTerminal(name, `${name} Terminal`, provider.command, provider.args, Object.keys(env).length > 0 ? env : undefined, kind, providerId, 0, undefined);
-    }
+    termId = await terminalStore.createTerminal(
+      name, `${name} Terminal`,
+      provider.command, provider.args,
+      Object.keys(env).length > 0 ? env : undefined,
+      kind, providerId, 0, undefined,
+    );
 
     const current = useAppStore.getState();
-    const pos = current.agents.length === 0
-      ? {
-          x: snapToGrid(LAYOUT_ENGINE_SPEC.arrangements.startX, LAYOUT_ENGINE_SPEC.arrangements.gridSnap),
-          y: snapToGrid(LAYOUT_ENGINE_SPEC.chrome.topOffset + LAYOUT_ENGINE_SPEC.arrangements.tidyPadding, LAYOUT_ENGINE_SPEC.arrangements.gridSnap),
-        }
-      : findViewportPosition(current.agents, current.viewportPan, current.viewportZoom, current.viewportWinSize);
+    const pos = useWorkspaceStore.getState().spawnPosition(lastAgentId);
 
     const id = crypto.randomUUID();
     await store.addAgent({ id, name, role, status: 'idle', terminalId: termId || undefined, provider: providerId, x: pos.x, y: pos.y, color });
     lastAgentId = id;
     lastTerminalId = termId || undefined;
+    spawnedNames.push(name.split(' - ')[0]);
   }
 
-  return { ok: true, message: `Spawned ${Math.min(Math.max(count, 1), 4)} ${provider.name} agent(s)`, agentId: lastAgentId, terminalId: lastTerminalId };
+  const displayProvider = provider.name || providerId;
+  const actualCount = Math.min(Math.max(count, 1), 4);
+  let message: string;
+  if (actualCount === 1 && spawnedNames[0]) {
+    message = `${spawnedNames[0]} the ${displayProvider} agent is ready`;
+  } else if (actualCount === 2 && spawnedNames.length === 2) {
+    message = `${spawnedNames[0]} and ${spawnedNames[1]} are ready`;
+  } else {
+    const numWords = ['one', 'two', 'three', 'four'];
+    message = `${numWords[actualCount - 1] || actualCount} ${displayProvider} agents spinning up`;
+  }
+
+  return { ok: true, message, agentId: lastAgentId, terminalId: lastTerminalId };
 }
 
 export async function removeAgentByQuery(query: string): Promise<AppCommandResult> {
@@ -133,8 +119,7 @@ export async function arrangeAgents(mode?: LayoutMode): Promise<AppCommandResult
     return { ok: true, message: `🏛️ ${labels[mode] ?? mode} layout applied` };
   }
 
-  // Default: fluid grid wrap (no mode override)
-  store.updateAgentPositions(autoLayout(store.agents));
+  useWorkspaceStore.getState().autoArrange();
   return { ok: true, message: `Arranged ${store.agents.length} agent(s)` };
 }
 
@@ -144,7 +129,9 @@ export type AppCommand =
   | { kind: 'removeAll' }
   | { kind: 'arrange'; mode?: LayoutMode }
   | { kind: 'focus'; query: string }
-  | { kind: 'message'; text: string; agentName?: string };
+  | { kind: 'message'; text: string; agentName?: string }
+  | { kind: 'browser'; action: 'open' | 'close'; url?: string | null }
+  | { kind: 'music'; action: 'play' | 'pause' | 'next' | 'prev' | 'toggle' | 'close' | 'shuffle' | 'repeat' | 'search' | 'playUrl'; url?: string; query?: string };
 
 export async function executeAppCommand(command: AppCommand): Promise<AppCommandResult> {
   switch (command.kind) {
@@ -182,6 +169,59 @@ export async function executeAppCommand(command: AppCommand): Promise<AppCommand
         return { ok: true, message: `Sent to ${agent.name}` };
       } catch {
         return { ok: false, message: `Failed to send to ${agent.name}` };
+      }
+    }
+    case 'browser': {
+      if (command.action === 'open') {
+        const store = (await import('../stores/useBrowserStore')).useBrowserStore.getState();
+        store.openBrowser(command.url || undefined);
+        return { ok: true, message: command.url ? `Browser opened, navigating to ${command.url}` : 'Browser opened' };
+      }
+      if (command.action === 'close') {
+        const store = (await import('../stores/useBrowserStore')).useBrowserStore.getState();
+        store.setVisible(false);
+        return { ok: true, message: 'Browser closed' };
+      }
+      return { ok: false, message: 'Unknown browser command' };
+    }
+    case 'music': {
+      const store = (await import('../stores/useMusicPlayerStore')).useMusicPlayerStore.getState();
+      switch (command.action) {
+        case 'play':
+        case 'toggle':
+          store.setVisible(true);
+          return { ok: true, message: 'Music player opened' };
+        case 'pause':
+          store.pause();
+          return { ok: true, message: 'Music paused' };
+        case 'next':
+          store.next();
+          return { ok: true, message: 'Next track' };
+        case 'prev':
+          store.prev();
+          return { ok: true, message: 'Previous track' };
+        case 'close':
+          store.setVisible(false);
+          return { ok: true, message: 'Music player closed' };
+        case 'shuffle':
+          store.toggleShuffle();
+          return { ok: true, message: store.shuffle ? 'Shuffle on' : 'Shuffle off' };
+        case 'repeat':
+          store.cycleRepeat();
+          return { ok: true, message: `Repeat: ${store.repeat}` };
+        case 'search':
+          store.setVisible(true);
+          store.setSearchQuery(command.query || '');
+          return { ok: true, message: `Searching for ${command.query}` };
+        case 'playUrl':
+          if (command.url) {
+            store.setVisible(true);
+            store.playUrl(command.url);
+            return { ok: true, message: `Playing ${command.url}` };
+          }
+          return { ok: false, message: 'No URL provided' };
+        default:
+          return { ok: false, message: 'Unknown music command' };
       }
     }
     default:

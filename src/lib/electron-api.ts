@@ -29,6 +29,27 @@ declare global {
     fileSyncStop: () => Promise<{ success: boolean }>;
     fileSyncGetState: () => Promise<SyncState>;
     onFileSyncStateChanged: (callback: (state: SyncState) => void) => () => void;
+    // ── Browser ────────────────────────────────────────────
+    browserNavigate: (id: string, url: string) => Promise<{ success: boolean }>;
+    browserGoBack: (id: string) => Promise<{ success: boolean }>;
+    browserGoForward: (id: string) => Promise<{ success: boolean }>;
+    browserRefresh: (id: string) => Promise<{ success: boolean }>;
+    onBrowserNavigate: (id: string, callback: (url: string) => void) => () => void;
+    onBrowserGoBack: (id: string, callback: () => void) => () => void;
+    onBrowserGoForward: (id: string, callback: () => void) => () => void;
+    onBrowserRefresh: (id: string, callback: () => void) => () => void;
+    // ── Music Player ───────────────────────────────────────
+    musicResolveUrl: (url: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+    musicSearch: (query: string, source?: string) => Promise<{ success: boolean; data?: any[]; error?: string }>;
+    musicPlaylist: (url: string) => Promise<{ success: boolean; data?: any; type?: string; error?: string }>;
+    musicStreamUrl: (url: string) => Promise<{ success: boolean; data?: { url: string; type: string }; error?: string }>;
+    musicScAuthUrl: () => Promise<{ success: boolean; data?: { authUrl: string } }>;
+    musicScAuthToken: (code: string) => Promise<{ success: boolean; data?: { token: string }; error?: string }>;
+    musicScUser: (token: string) => Promise<{ success: boolean; data?: { id: string; username: string; avatar: string }; error?: string }>;
+    // ── Auto-Updater ───────────────────────────────────────
+    checkForUpdates: () => Promise<{ success: boolean; updateInfo?: any; error?: string }>;
+    triggerUpdate: () => Promise<{ success: boolean; error?: string }>;
+    onUpdateStatus: (callback: (payload: { status: string; version: string | null; percent: number }) => void) => () => void;
   }
 }
 
@@ -207,6 +228,85 @@ export function onFileSyncStateChanged(cb: (state: SyncState) => void): () => vo
   return api.onFileSyncStateChanged(cb);
 }
 
+// ── Browser API ────────────────────────────────────────────────────
+
+export function browserNavigate(id: string, url: string): Promise<{ success: boolean }> {
+  if (!api?.browserNavigate) return Promise.resolve({ success: false });
+  return api.browserNavigate(id, url);
+}
+
+export function browserGoBack(id: string): Promise<{ success: boolean }> {
+  if (!api?.browserGoBack) return Promise.resolve({ success: false });
+  return api.browserGoBack(id);
+}
+
+export function browserGoForward(id: string): Promise<{ success: boolean }> {
+  if (!api?.browserGoForward) return Promise.resolve({ success: false });
+  return api.browserGoForward(id);
+}
+
+export function browserRefresh(id: string): Promise<{ success: boolean }> {
+  if (!api?.browserRefresh) return Promise.resolve({ success: false });
+  return api.browserRefresh(id);
+}
+
+export function onBrowserNavigate(id: string, cb: (url: string) => void): () => void {
+  if (!api?.onBrowserNavigate) return () => {};
+  return api.onBrowserNavigate(id, cb);
+}
+
+export function onBrowserGoBack(id: string, cb: () => void): () => void {
+  if (!api?.onBrowserGoBack) return () => {};
+  return api.onBrowserGoBack(id, cb);
+}
+
+export function onBrowserGoForward(id: string, cb: () => void): () => void {
+  if (!api?.onBrowserGoForward) return () => {};
+  return api.onBrowserGoForward(id, cb);
+}
+
+export function onBrowserRefresh(id: string, cb: () => void): () => void {
+  if (!api?.onBrowserRefresh) return () => {};
+  return api.onBrowserRefresh(id, cb);
+}
+
+// ── Music Player API ───────────────────────────────────────────────
+
+export function musicResolveUrl(url: string): Promise<{ success: boolean; data?: any; error?: string }> {
+  if (!api?.musicResolveUrl) return Promise.resolve({ success: false, error: 'no api' });
+  return api.musicResolveUrl(url);
+}
+
+export function musicSearch(query: string, source?: string): Promise<{ success: boolean; data?: any[]; error?: string }> {
+  if (!api?.musicSearch) return Promise.resolve({ success: false, error: 'no api' });
+  return api.musicSearch(query, source);
+}
+
+export function musicPlaylist(url: string): Promise<{ success: boolean; data?: any; type?: string; error?: string }> {
+  if (!api?.musicPlaylist) return Promise.resolve({ success: false, error: 'no api' });
+  return api.musicPlaylist(url);
+}
+
+export function musicStreamUrl(url: string): Promise<{ success: boolean; data?: { url: string; type: string }; error?: string }> {
+  if (!api?.musicStreamUrl) return Promise.resolve({ success: false, error: 'no api' });
+  return api.musicStreamUrl(url);
+}
+
+export function musicScAuthUrl(): Promise<{ success: boolean; data?: { authUrl: string } }> {
+  if (!api?.musicScAuthUrl) return Promise.resolve({ success: false });
+  return api.musicScAuthUrl();
+}
+
+export function musicScAuthToken(code: string): Promise<{ success: boolean; data?: { token: string }; error?: string }> {
+  if (!api?.musicScAuthToken) return Promise.resolve({ success: false, error: 'no api' });
+  return api.musicScAuthToken(code);
+}
+
+export function musicScUser(token: string): Promise<{ success: boolean; data?: { id: string; username: string; avatar: string }; error?: string }> {
+  if (!api?.musicScUser) return Promise.resolve({ success: false, error: 'no api' });
+  return api.musicScUser(token);
+}
+
 export function onVoicePartial(cb: (text: string) => void): () => void {
   if (!api) return () => {};
   return api.listen('voice_partial', cb);
@@ -235,4 +335,23 @@ export function onVoiceError(cb: (msg: string) => void): () => void {
 export function onVoiceStatus(cb: (msg: string) => void): () => void {
   if (!api) return () => {};
   return api.listen('voice_status', cb);
+}
+
+// ── Auto-Updater wrappers ─────────────────────────────────────────
+
+export function checkForUpdates(): Promise<{ success: boolean; updateInfo?: any; error?: string }> {
+  if (!api?.checkForUpdates) return Promise.resolve({ success: false, error: 'no bridge' });
+  return api.checkForUpdates();
+}
+
+export function triggerUpdate(): Promise<{ success: boolean; error?: string }> {
+  if (!api?.triggerUpdate) return Promise.resolve({ success: false, error: 'no bridge' });
+  return api.triggerUpdate();
+}
+
+export function onUpdateStatus(
+  cb: (payload: { status: string; version: string | null; percent: number }) => void,
+): () => void {
+  if (!api?.onUpdateStatus) return () => {};
+  return api.onUpdateStatus(cb);
 }

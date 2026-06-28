@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { autoUpdater } from 'electron-updater';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { exec } from 'child_process';
@@ -6,6 +7,15 @@ import fs from 'fs';
 import os from 'os';
 import { OrchMcpServer } from './mcp-server.js';
 import { VoiceServer } from './voice-server.js';
+import {
+  initLocalDb, getDbPath,
+  recordTerminalStart, updateTerminalBuffer, finaliseTerminal, listTerminalHistory,
+  logAgentEvent, listAgentLogs,
+  recordSessionEvent, listSessionEvents,
+  upsertLocalWorkspace, listLocalWorkspaces, deleteLocalWorkspace,
+  saveLocalSettings, getLocalSettings,
+  getLocalStats, resetLocalDb,
+} from './local-db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -171,6 +181,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      webviewTag: true,
     },
   });
 
@@ -196,16 +207,142 @@ function createWindow() {
   });
 }
 
-// ── MCP Server ─── VPS-HOSTED ─────────────────────────────────────
-// Local MCP server is disabled. All tools are served from the VPS:
-//   GET  /api/mcp/tools   — list tools
-//   POST /api/mcp/call    — invoke a tool
-//   WS   /voice-ws        — state broadcasts
-// The VPS workspace persists independently of the Electron app.
+// ── MCP Server ─── LOCAL-ONLY ─────────────────────────────────────
+// MCP server runs locally. All tools serve from the local machine.
 
 async function startMcpServer() {
-  // Disabled — using VPS-hosted MCP instead
-  console.log('[MCP] Using VPS-hosted MCP server (http://51.170.134.197:8000/api/mcp)');
+  if (mcpServer) return;
+  const server = new OrchMcpServer(sessions);
+  mcpServer = server;
+
+  // Wire canvas callbacks from main process state
+  // These let MCP tools access the live canvas and PTY sessions.
+  // Output is compressed markdown — not raw JSON — to save context
+  // window tokens on free-tier LLMs.
+  server.getCanvasState = async () => {
+    const now = Date.now();
+    const items = Array.from(sessions.entries());
+    const active = items.filter(([, s]) => !s.hibernating);
+    const sleeping = items.filter(([, s]) => s.hibernating);
+
+    // Build a compact agent table
+    const agentRows = items.map(([id, s]) => {
+      const idleSecs = Math.round((now - s.lastActivity) / 1000);
+      const idleStr = idleSecs < 60 ? `${idleSecs}s` : `${Math.floor(idleSecs / 60)}m ${idleSecs % 60}s`;
+      const bufLen = s.buffer.length;
+      const statusIcon = s.hibernating ? '💤' : '▶';
+      return `| ${s.name} | ${s.providerId || 'shell'} | ${statusIcon} ${s.hibernating ? 'sleeping' : 'active'} | ${idleStr} | ${bufLen} lines |`;
+    });
+
+    const summary = [
+      `## Canvas: ${items.length} agent(s) — ${active.length} active, ${sleeping.length} sleeping`,
+      '',
+      '| Agent | Provider | Status | Idle | Buffer |',
+      '|---|---|---|---|---|',
+      ...agentRows,
+      '',
+      '### Activity',
+      ...items.map(([id, s]) => {
+        if (s.hibernating) return `- ${s.name} (${s.providerId || 'shell'}): 💤 sleeping, ${s.buffer.length} lines cached`;
+        const idleSecs = Math.round((now - s.lastActivity) / 1000);
+        return `- ${s.name} (${s.providerId || 'shell'}): ▶ active, idle ${idleSecs}s, ${s.buffer.length} lines`;
+      }),
+      '',
+    ].join('\n');
+
+    return summary;
+  };
+
+  server.getCanvasElements = async () => {
+    // Forward to renderer via IPC — the canvas elements live in React
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      return mainWindow.webContents.executeJavaScript(
+        'window.__orchGetCanvasElements ? window.__orchGetCanvasElements() : []'
+      ).catch(() => []);
+    }
+    return [];
+  };
+
+  server.getAgent = async (id: string) => {
+    for (const [, session] of sessions) {
+      if (session.agentId === id) {
+        const now = Date.now();
+        const idleSecs = Math.round((now - session.lastActivity) / 1000);
+        const idleStr = idleSecs < 60 ? `${idleSecs}s` : `${Math.floor(idleSecs / 60)}m ${idleSecs % 60}s`;
+        const created = new Date(session.createdAt).toISOString().replace('T', ' ').slice(0, 19);
+        const statusIcon = session.hibernating ? '💤' : '▶';
+        return [
+          `## Agent: ${session.name} (${session.providerId || 'shell'})`,
+          `- Status: ${statusIcon} ${session.hibernating ? 'sleeping' : 'active'} • Idle: ${idleStr} • Buffer: ${session.buffer.length} lines`,
+          `- Shell: ${session.shell} • Kind: ${session.kind}`,
+          `- Started: ${created}`,
+          session.delegationDepth > 0 ? `- Delegation depth: ${session.delegationDepth}` : '',
+          session.contextSnapshot !== '{}' ? `- Context: ${session.contextSnapshot.slice(0, 200)}` : '',
+        ].filter(Boolean).join('\n');
+      }
+    }
+    return null;
+  };
+
+  server.moveAgent = async (id: string, x: number, y: number) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('mcp-move-agent', { agentId: id, x, y });
+    }
+  };
+
+  server.sendToAgent = async (id: string, text: string) => {
+    for (const [, session] of sessions) {
+      if (session.agentId === id && session.pty) {
+        session.pty.write(text + '\n');
+        return;
+      }
+    }
+  };
+
+  server.readAgentOutput = async (id: string, lines?: number) => {
+    for (const [, session] of sessions) {
+      if (session.agentId === id) {
+        return session.buffer.slice(-(lines || 50)).join('');
+      }
+    }
+    return '';
+  };
+
+  server.createAgent = async (providerId: string, name?: string, contextSnapshot?: string) => {
+    // For now, emit an IPC to the renderer so the React side can handle it
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('mcp-create-agent', { providerId, name, contextSnapshot });
+    }
+    return { providerId, name, status: 'pending' };
+  };
+
+  server.removeAgent = async (id: string) => {
+    for (const [sessionId, session] of sessions) {
+      if (session.agentId === id) {
+        if (session.pty) {
+          try { session.pty.kill(); } catch { /* ignore */ }
+        }
+        sessions.delete(sessionId);
+        const fullOutput = session.buffer.join('');
+        finaliseTerminal(sessionId, null, fullOutput);
+        return;
+      }
+    }
+  };
+
+  server.getSessionAgentId = (sessionId: string) => {
+    const session = sessions.get(sessionId);
+    return session?.agentId;
+  };
+
+  server.getProviders = () => {
+    // Return configured providers — reads from local settings
+    const settings = getLocalSettings();
+    return settings.providers || [];
+  };
+
+  await server.start();
+  console.log(`[MCP] Server started on ${server.url}`);
 }
 
 // ── Hibernation Manager ──────────────────────────────────────────
@@ -219,11 +356,17 @@ function startHibernationManager() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('agent-status-changed', { agentId, status: 'sleeping', sessionId });
     }
+    const session = sessions.get(sessionId);
+    logAgentEvent(agentId, session?.name || 'unknown', session?.providerId || '', 'hibernated');
+    recordSessionEvent('focus_change', { sessionId, agentId, action: 'hibernate' });
   };
   hibernationManager.onWake = (sessionId, agentId) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('agent-status-changed', { agentId, status: 'active', sessionId });
     }
+    const session = sessions.get(sessionId);
+    logAgentEvent(agentId, session?.name || 'unknown', session?.providerId || '', 'woken');
+    recordSessionEvent('focus_change', { sessionId, agentId, action: 'wake' });
   };
 
   hibernationManager.start();
@@ -550,7 +693,12 @@ ipcMain.handle('create_terminal', async (_event, { agentId, name, command, args,
       cols: 140,
       rows: 40,
       cwd,
-      env: shellEnv ? { ...process.env, ...shellEnv } : process.env,
+      env: {
+        ...process.env,
+        ...shellEnv,
+        COLORTERM: 'truecolor',
+        TERM: 'xterm-256color',
+      },
     });
 
     const session: PtySession = {
@@ -582,6 +730,9 @@ ipcMain.handle('create_terminal', async (_event, { agentId, name, command, args,
       if (session.buffer.length > MAX_BUF_LINES) {
         session.buffer.splice(0, session.buffer.length - MAX_BUF_LINES);
       }
+      // ── Track buffer in local DB ──────────────────────────
+      const chunkLines = rawChunk.split('\n');
+      updateTerminalBuffer(sessionId, rawChunk.length, chunkLines.length - 1, rawChunk.slice(-200));
       // Forward raw output to UI immediately (renders ANSI for the terminal emulator)
       forwardOutput(sessionId, rawChunk);
 
@@ -687,7 +838,13 @@ ipcMain.handle('create_terminal', async (_event, { agentId, name, command, args,
           );
         }
       }
-      forwardOutput(sessionId, `\r\n[Process exited with code ${exitCode}]\r\n`);
+      forwardOutput(sessionId, `
+\n[Process exited with code ${exitCode}]
+\n`);
+      // ── Finalise terminal in local DB ────────────────
+      const fullOutput = session.buffer.join('');
+      finaliseTerminal(sessionId, exitCode, fullOutput);
+      logAgentEvent(session.agentId, session.name, session.providerId, 'exited', `exitCode=${exitCode}`);
       // Clean up temp MCP config directory
       if (mcpConfigDir) {
         try { fs.rmSync(mcpConfigDir, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -696,6 +853,10 @@ ipcMain.handle('create_terminal', async (_event, { agentId, name, command, args,
 
     sessions.set(sessionId, session);
     console.log(`[PTY] Created session ${sessionId} (shell=${shell})`);
+
+    // ── Record terminal start in local DB ──────────────
+    recordTerminalStart(sessionId, session.agentId, session.name, session.providerId);
+    logAgentEvent(session.agentId, session.name, session.providerId, 'spawned', shell);
 
     // ── 1. Auto-subscribe this agent to other agents' terminal events ──
     if (mcpServer) {
@@ -758,6 +919,9 @@ ipcMain.handle('close_terminal', async (_event, { sessionId }) => {
     if (session.pty) {
       try { session.pty.kill(); } catch { /* already dead */ }
     }
+    // Finalise if not already done
+    const fullOutput = session.buffer.join('');
+    finaliseTerminal(sessionId, null, fullOutput);
     sessions.delete(sessionId);
     console.log(`[PTY] Closed session ${sessionId}`);
   }
@@ -767,6 +931,7 @@ ipcMain.handle('close_terminal', async (_event, { sessionId }) => {
 ipcMain.handle('resize_terminal', async (_event, { sessionId, cols, rows }) => {
   const session = sessions.get(sessionId);
   if (session && session.pty) session.pty.resize(cols, rows);
+  recordSessionEvent('window_resize', { sessionId, cols, rows });
   return { success: true };
 });
 
@@ -832,30 +997,181 @@ ipcMain.handle('workspace_exists', async (_event, { workspacePath }) => {
   return fs.existsSync(filePath);
 });
 
-// ── IPC: File Sync ────────────────────────────────────────────────
-
-ipcMain.handle('filesync_start', async (_event, { workspaceId, localPath, vpsUrl }) => {
-  const { fileSyncEngine } = await import('./file-sync-engine.js');
-  await fileSyncEngine.start(workspaceId, localPath, vpsUrl);
-  return { success: true };
-});
-
-ipcMain.handle('filesync_stop', async () => {
-  const { fileSyncEngine } = await import('./file-sync-engine.js');
-  fileSyncEngine.stop();
-  return { success: true };
-});
-
-ipcMain.handle('filesync_get_state', async () => {
-  const { fileSyncEngine } = await import('./file-sync-engine.js');
-  return fileSyncEngine.state;
-});
-
-// ── IPC: Voice ───────────────────────────────────────────────────
+// ── IPC: Voice ───────────────────────────────────
 
 ipcMain.handle('toggle_voice', async () => {
   console.log('[IPC] toggle_voice');
   return 'toggled';
+});
+
+// ── IPC: Browser ──────────────────────────────────────────────────
+
+ipcMain.handle('browser_navigate', async (_event, { id, url }) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(`browser_nav_${id}`, url);
+  }
+  return { success: true };
+});
+
+ipcMain.handle('browser_go_back', async (_event, { id }) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(`browser_back_${id}`, true);
+  }
+  return { success: true };
+});
+
+ipcMain.handle('browser_go_forward', async (_event, { id }) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(`browser_fwd_${id}`, true);
+  }
+  return { success: true };
+});
+
+ipcMain.handle('browser_refresh', async (_event, { id }) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(`browser_refresh_${id}`, true);
+  }
+  return { success: true };
+});
+
+// ── IPC: Music Player (YouTube / SoundCloud via play-dl) ────────
+
+ipcMain.handle('music_resolve_url', async (_event, { url }) => {
+  try {
+    const playdl = require('play-dl');
+    // Try YouTube first
+    const isSc = url.includes('soundcloud.com');
+    if (!isSc) {
+      try {
+        const resolved = await playdl.video_info(url);
+        const info = resolved.video_details;
+        const stream = await playdl.stream(url, { quality: 0 }).catch(() => null);
+        return {
+          success: true,
+          data: {
+            title: info.title,
+            duration: info.durationInSec,
+            thumb: info.thumbnails[info.thumbnails.length - 1]?.url || '',
+            channel: info.channel?.name || '',
+            url: stream?.url || '',
+            source: 'youtube' as const,
+          },
+        };
+      } catch {
+        // fall through to SoundCloud attempt
+      }
+    }
+    // SoundCloud
+    const scInfo = await playdl.soundcloud(url);
+    const stream = await playdl.stream(url, { quality: 0 }).catch(() => null);
+    return {
+      success: true,
+      data: {
+        title: scInfo.name,
+        duration: scInfo.durationInSec || 0,
+        thumb: scInfo.thumbnail || '',
+        channel: scInfo.user?.name || '',
+        url: stream?.url || '',
+        source: 'soundcloud' as const,
+      },
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Failed to resolve' };
+  }
+});
+
+ipcMain.handle('music_search', async (_event, { query, source }) => {
+  try {
+    const playdl = require('play-dl');
+    const isSc = source === 'soundcloud';
+    const so = isSc ? { soundcloud: 'tracks' as const } : { youtube: 'video' as const };
+    const results = await playdl.search(query, { limit: 10, source: so });
+    const tracks = results.map((r: any) => {
+      if (isSc) {
+        return {
+          id: String(r.id),
+          title: r.name,
+          duration: r.durationInSec || 0,
+          thumb: r.thumbnail || '',
+          channel: r.user?.name || '',
+          url: r.url || r.permalink || '',
+          source: 'soundcloud' as const,
+        };
+      }
+      return {
+        id: r.id,
+        title: r.title,
+        duration: r.durationInSec || 0,
+        thumb: r.thumbnails?.[r.thumbnails.length - 1]?.url || '',
+        channel: r.channel?.name || '',
+        url: r.url,
+        source: 'youtube' as const,
+      };
+    });
+    return { success: true, data: tracks };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('music_playlist', async (_event, { url }) => {
+  try {
+    const playdl = require('play-dl');
+    const playlist = await playdl.playlist_info(url, { incomplete: true });
+    const tracks = await playlist.all_videos();
+    const items = tracks.map((v: any) => ({
+      id: v.id,
+      title: v.title,
+      duration: v.durationInSec || 0,
+      thumb: v.thumbnails?.[v.thumbnails.length - 1]?.url || '',
+      channel: v.channel?.name || '',
+      url: v.url,
+      source: 'youtube' as const,
+    }));
+    return { success: true, data: { title: playlist.title || 'Playlist', tracks: items }, type: 'playlist' };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('music_stream_url', async (_event, { url }) => {
+  try {
+    const playdl = require('play-dl');
+    const stream = await playdl.stream(url, { quality: 0 });
+    return { success: true, data: { url: stream.url, type: stream.type || 'audio' } };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('music_sc_auth_url', async () => {
+  // SoundCloud OAuth — return the authorization URL
+  const clientId = 'YOUR_SOUNDCLOUD_CLIENT_ID'; // Replace or use env
+  const redirectUri = 'orch://soundcloud/callback';
+  const url = `https://soundcloud.com/connect?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=non-expiring`;
+  return { success: true, data: { authUrl: url } };
+});
+
+ipcMain.handle('music_sc_auth_token', async (_event, { code }) => {
+  try {
+    const playdl = require('play-dl');
+    // Exchange code for token
+    const token = await playdl.soundcloud_token(code);
+    return { success: true, data: { token } };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('music_sc_user', async (_event, { token }) => {
+  try {
+    const playdl = require('play-dl');
+    const sc = await playdl.soundcloud(token);
+    const me = await sc.getMe();
+    return { success: true, data: { id: me.id, username: me.username, avatar: me.avatar_url } };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
 });
 
 // ── IPC: Window controls ─────────────────────────────────────────
@@ -867,9 +1183,173 @@ ipcMain.handle('window_maximize', () => {
 });
 ipcMain.handle('window_close', () => mainWindow?.close());
 
+// ── IPC: Local Database ──────────────────────────────────────────
+
+ipcMain.handle('local_db_get_stats', async () => {
+  return getLocalStats();
+});
+
+ipcMain.handle('local_db_get_path', async () => {
+  return getDbPath();
+});
+
+// Terminal History
+ipcMain.handle('local_db_record_terminal_start', async (_event, { sessionId, agentId, name, providerId }) => {
+  recordTerminalStart(sessionId, agentId, name, providerId);
+  return { success: true };
+});
+
+ipcMain.handle('local_db_update_terminal_buffer', async (_event, { sessionId, charCount, lineCount, lastChunk }) => {
+  updateTerminalBuffer(sessionId, charCount, lineCount, lastChunk);
+  return { success: true };
+});
+
+ipcMain.handle('local_db_finalise_terminal', async (_event, { sessionId, exitCode, fullBuffer }) => {
+  finaliseTerminal(sessionId, exitCode, fullBuffer);
+  return { success: true };
+});
+
+ipcMain.handle('local_db_list_terminal_history', async (_event, { limit }) => {
+  return listTerminalHistory(limit ?? 50);
+});
+
+// Agent Logs
+ipcMain.handle('local_db_log_agent_event', async (_event, { agentId, name, providerId, event, detail }) => {
+  logAgentEvent(agentId, name, providerId, event, detail);
+  return { success: true };
+});
+
+ipcMain.handle('local_db_list_agent_logs', async (_event, { agentId, limit }) => {
+  return listAgentLogs(agentId, limit ?? 50);
+});
+
+// Session Events
+ipcMain.handle('local_db_record_session_event', async (_event, { type, data }) => {
+  recordSessionEvent(type, data);
+  return { success: true };
+});
+
+ipcMain.handle('local_db_list_session_events', async (_event, { type, limit }) => {
+  return listSessionEvents(type, limit ?? 30);
+});
+
+// Workspaces (local)
+ipcMain.handle('local_db_upsert_workspace', async (_event, { id, data }) => {
+  upsertLocalWorkspace(id, data);
+  return { success: true };
+});
+
+ipcMain.handle('local_db_list_workspaces', async () => {
+  return listLocalWorkspaces();
+});
+
+ipcMain.handle('local_db_delete_workspace', async (_event, { id }) => {
+  deleteLocalWorkspace(id);
+  return { success: true };
+});
+
+// Settings (local)
+ipcMain.handle('local_db_save_settings', async (_event, { settings }) => {
+  saveLocalSettings(settings);
+  return { success: true };
+});
+
+ipcMain.handle('local_db_get_settings', async () => {
+  return getLocalSettings();
+});
+
+// ── Auto-Updater ───────────────────────────────────────────────────
+// Checks public GitHub releases for new desktop versions. The
+// frontend uses `check-for-updates` on startup (silent) and
+// `trigger-update` when the user clicks "Install update".
+
+autoUpdater.autoDownload = false;           // we control the download
+autoUpdater.autoInstallOnAppQuit = true;    // install on graceful exit
+
+autoUpdater.on('update-available', (info) => {
+  const version = info.version;
+  console.log(`[Updater] Update v${version} available`);
+  mainWindow?.webContents.send('update-status', {
+    status: 'available',
+    version,
+    percent: 0,
+  });
+});
+
+autoUpdater.on('download-progress', (progress) => {
+  const percent = Math.round(progress.percent);
+  mainWindow?.webContents.send('update-status', {
+    status: 'downloading',
+    version: null,
+    percent,
+  });
+});
+
+autoUpdater.on('update-downloaded', (info) => {
+  console.log(`[Updater] v${info.version} downloaded — ready to install`);
+  mainWindow?.webContents.send('update-status', {
+    status: 'ready',
+    version: info.version,
+    percent: 100,
+  });
+});
+
+autoUpdater.on('error', (err) => {
+  console.warn('[Updater] Error:', err.message?.slice(0, 120));
+  mainWindow?.webContents.send('update-status', {
+    status: 'idle',
+    version: null,
+    percent: 0,
+  });
+});
+
+// ── IPC: Frontend triggers ────────────────────────────────────────
+
+ipcMain.handle('check-for-updates', async () => {
+  try {
+    mainWindow?.webContents.send('update-status', {
+      status: 'checking', version: null, percent: 0,
+    });
+    const result = await autoUpdater.checkForUpdates();
+    if (!result || !result.updateInfo) {
+      // No update found — back to idle
+      mainWindow?.webContents.send('update-status', {
+        status: 'idle', version: null, percent: 0,
+      });
+    }
+    return { success: true, updateInfo: result?.updateInfo || null };
+  } catch (err: any) {
+    console.warn('[Updater] check failed:', err.message?.slice(0, 120));
+    mainWindow?.webContents.send('update-status', {
+      status: 'idle', version: null, percent: 0,
+    });
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('trigger-update', async () => {
+  try {
+    mainWindow?.webContents.send('update-status', {
+      status: 'downloading', version: null, percent: 0,
+    });
+    await autoUpdater.downloadUpdate();
+    // download triggers update-downloaded which sends 'ready'
+    return { success: true };
+  } catch (err: any) {
+    console.warn('[Updater] download failed:', err.message?.slice(0, 120));
+    mainWindow?.webContents.send('update-status', {
+      status: 'idle', version: null, percent: 0,
+    });
+    return { success: false, error: err.message };
+  }
+});
+
 // ── App lifecycle ────────────────────────────────────────────────
 
 app.whenReady().then(() => {
+  // ── Initialise local database ──────────────────────────
+  initLocalDb();
+
   createWindow();
   // Start voice server
   voiceServer = new VoiceServer();
@@ -883,15 +1363,7 @@ app.whenReady().then(() => {
   });
   voiceServer.start();
 
-  // Wire FileSyncEngine events to renderer
-  import('./file-sync-engine.js').then(({ fileSyncEngine }) => {
-    fileSyncEngine.on('state-changed', (state) => {
-      mainWindow?.webContents.send('filesync_state_changed', state);
-    });
-    fileSyncEngine.on('log', (msg: string) => {
-      console.log(msg);
-    });
-  });
+  console.log('[Main] ORCH ready — local-only mode');
 });
 
 app.on('window-all-closed', () => {
@@ -904,7 +1376,11 @@ app.on('activate', () => {
 
 app.on('will-quit', () => {
   voiceServer?.stop();
-  for (const [, s] of sessions) if (s.pty) s.pty.kill();
+  for (const [id, s] of sessions) {
+    if (s.pty) s.pty.kill();
+    const fullOutput = s.buffer.join('');
+    finaliseTerminal(id, null, fullOutput);
+  }
   sessions.clear();
   if (hibernationManager) hibernationManager.stop();
 });

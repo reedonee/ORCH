@@ -6,6 +6,7 @@ import React, { useEffect, useState } from 'react';
 import { FolderOpen, Plus, RotateCcw, X, HardDrive, Cloud, Globe, AlertCircle } from 'lucide-react';
 import { useWorkspaceStore } from '../stores/useWorkspaceStore';
 import { useAuthStore } from '../stores/useAuthStore';
+import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
 import { listWorkspaces, getDevicePath } from '../lib/db';
 import type { WorkspaceMeta } from '../types/workspace';
 
@@ -132,7 +133,7 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ onClose }) => 
     <div
       onClick={onClose}
       style={{
-        position: 'fixed', inset: 0, zIndex: 2000,
+        position: 'fixed', inset: 0, zIndex: Z_BASE_LAYERS.modal,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         background: 'rgba(0,0,0,0.5)',
         backdropFilter: 'blur(4px)',

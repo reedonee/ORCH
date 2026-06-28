@@ -4,7 +4,9 @@ import { GlassPanel } from './GlassPanel';
 import { useAppStore } from '../stores/useAppStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
+import { useWorkspaceStore } from '../stores/useWorkspaceStore';
 import { PROVIDER_ICONS } from './icons/ProviderIcon';
+import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
 import { pickAgentName } from '../lib/agent-names';
 
 interface AddAgentDialogProps {
@@ -84,8 +86,9 @@ export const AddAgentDialog: React.FC<AddAgentDialogProps> = ({ onClose }) => {
       }
 
       const { agents } = useAppStore.getState();
-      const x = 50 + (agents.length % 4) * 560;
-      const y = 50 + Math.floor(agents.length / 4) * 400;
+      const pos = useWorkspaceStore.getState().spawnPosition();
+      const x = pos.x;
+      const y = pos.y;
 
       await addAgent({
         id: crypto.randomUUID(),
@@ -110,7 +113,7 @@ export const AddAgentDialog: React.FC<AddAgentDialogProps> = ({ onClose }) => {
   return (
     <div
       style={{
-        position: 'fixed', inset: 0, zIndex: 2000,
+        position: 'fixed', inset: 0, zIndex: Z_BASE_LAYERS.modal,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         background: 'rgba(0,0,0,0.6)',
         animation: 'fadeIn var(--anim-normal) ease',

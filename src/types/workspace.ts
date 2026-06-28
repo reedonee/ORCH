@@ -1,4 +1,6 @@
 // ── Workspace metadata (used in recent-workspaces.json) ──────────
+import type { LayoutPreset } from './panel';
+
 export interface WorkspaceMeta {
   path: string;
   name: string;
@@ -29,6 +31,12 @@ export interface WorkspaceStyleData {
   gridSnap: boolean;
 }
 
+// ── Named layout presets / snapshots ────────────────────────────
+export interface WorkspaceLayoutData {
+  presets: LayoutPreset[];
+  activePresetId: string | null;
+}
+
 // ── Top-level workspace file schema ──────────────────────────────
 export interface WorkspaceFile {
   version: number;
@@ -37,4 +45,5 @@ export interface WorkspaceFile {
   canvas: WorkspaceCanvasData;
   agents: WorkspaceAppData;
   style?: WorkspaceStyleData;  // optional for backward compat
+  layout?: WorkspaceLayoutData; // optional for backward compat
 }

@@ -1,0 +1,61 @@
+const SUPABASE_URL = 'https://gqbfswztfecvbsfeczdc.supabase.co';
+const SERVICE_KEY = 'eyJhbG...EWc0';
+
+async function main() {
+  // 1. Create the table via pg-meta query endpoint
+  const sql = `
+    CREATE TABLE IF NOT EXISTS public.feedbacks (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+      title text NOT NULL,
+      description text NOT NULL,
+      screenshot_path text,
+      status text NOT NULL DEFAULT 'pending',
+      submitted_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz,
+      system jsonb NOT NULL DEFAULT '{}'::jsonb
+    );
+    CREATE INDEX IF NOT EXISTS idx_feedbacks_submitted_at
+      ON public.feedbacks (submitted_at DESC);
+  `.trim();
+
+  // Try pg-meta API
+  console.log('Creating feedbacks table...');
+  let res = await fetch(`${SUPABASE_URL}/pg-meta/default/query`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'apikey': SERVICE_KEY, 'Authorization': `Bearer ${SERVICE_KEY}` },
+    body: JSON.stringify({ query: sql }),
+  });
+  let text = await res.text();
+  if (res.ok) {
+    console.log('✅ pg-meta success:', text.slice(0, 100));
+  } else {
+    console.log(`⚠ pg-meta ${res.status}: ${text.slice(0, 200)}`);
+
+    // Try management API directly? No, that needs PAT.
+    // Try using the supabase REST API with raw query via accept header
+    console.log('Trying REST API with Prefer header...');
+    res = await fetch(`${SUPABASE_URL}/rest/v1/feedbacks`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SERVICE_KEY,
+        'Authorization': `Bearer ${SERVICE_KEY}`,
+        'Prefer': 'resolution=merge-duplicates',
+      },
+    });
+    text = await res.text();
+    console.log(`REST POST result ${res.status}: ${text.slice(0, 200)}`);
+  }
+
+  // 2. Verify
+  console.log('\nVerifying...');
+  res = await fetch(`${SUPABASE_URL}/rest/v1/feedbacks?select=id&limit=1`, {
+    headers: { 'apikey': SERVICE_KEY, 'Authorization': `Bearer ${SERVICE_KEY}` },
+  });
+  text = await res.text();
+  console.log(`Verify ${res.status}: ${text.slice(0, 200)}`);
+  if (res.ok) console.log('✅ Table is accessible!');
+}
+
+main().catch(console.error);

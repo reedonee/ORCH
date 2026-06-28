@@ -73,11 +73,23 @@ export async function upsertWorkspace(
       .eq('id', workspace.id)
       .eq('version', expectedVersion)
       .select('id, version')
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
-    if (!data) throw new Error('Version conflict — workspace was modified elsewhere');
-    return { id: data.id, version: data.version };
+    if (data) return { id: data.id, version: data.version };
+
+    // Row doesn't exist (was deleted server-side) — insert fresh
+    const uid = await currentUserId();
+    payload.user_id = uid;
+    payload.version = 1;
+    delete payload.updated_at;
+    const { data: inserted, error: insertError } = await db()
+      .from('workspaces')
+      .insert({ ...payload, id: workspace.id })
+      .select('id, version')
+      .single();
+    if (insertError) throw insertError;
+    return { id: inserted!.id, version: inserted!.version };
   } else {
     // New workspace
     const uid = await currentUserId();
@@ -380,4 +392,123 @@ export async function deleteMcpServer(id: string): Promise<void> {
 /** Check if Supabase is configured and the user is authenticated. */
 export function isCloudReady(): boolean {
   return isSupabaseConfigured();
+}
+
+// ═════════════════════════════════════════════════════════════════
+// FEEDBACKS (Public Shared)
+// ═════════════════════════════════════════════════════════════════
+
+export interface FeedbackRow {
+  id: string;
+  user_id?: string;
+  title: string;
+  description: string;
+  screenshot_path?: string | null;
+  status: string;
+  submitted_at: string;
+  system?: Record<string, any>;
+}
+
+/** Fetch all public feedbacks (newest first). Returns empty array on error. */
+export async function listFeedbacks(): Promise<FeedbackRow[]> {
+  try {
+    const client = supabase;
+    if (!client) return [];
+    const { data, error } = await client
+      .from('feedbacks')
+      .select('*')
+      .order('submitted_at', { ascending: false });
+    if (error) {
+      if (error.code === 'PGRST116' || error.message?.includes('relation') || error.message?.includes('does not exist')) {
+        return []; // table doesn't exist yet — graceful
+      }
+      console.warn('[Cloud] listFeedbacks error:', error.message);
+      return [];
+    }
+    return (data || []) as FeedbackRow[];
+  } catch (err) {
+    console.warn('[Cloud] listFeedbacks failed:', err);
+    return [];
+  }
+}
+
+/** Insert a new feedback row. Returns the new id or null on failure. */
+export async function insertFeedback(fb: {
+  id: string;
+  title: string;
+  description: string;
+  screenshot_path?: string | null;
+  status?: string;
+  system?: Record<string, any>;
+}): Promise<string | null> {
+  try {
+    const client = supabase;
+    if (!client) return null;
+    const uid = await currentUserId().catch(() => null);
+    const { data, error } = await client
+      .from('feedbacks')
+      .insert({
+        id: fb.id,
+        user_id: uid,
+        title: fb.title,
+        description: fb.description,
+        screenshot_path: fb.screenshot_path ?? null,
+        status: fb.status ?? 'pending',
+        submitted_at: new Date().toISOString(),
+        system: fb.system ?? {},
+      })
+      .select('id')
+      .single();
+    if (error) {
+      if (error.message?.includes('relation') || error.message?.includes('does not exist')) {
+        return null; // table doesn't exist
+      }
+      console.warn('[Cloud] insertFeedback error:', error.message);
+      return null;
+    }
+    return data?.id ?? null;
+  } catch (err) {
+    console.warn('[Cloud] insertFeedback failed:', err);
+    return null;
+  }
+}
+
+/** Update a feedback's status. */
+export async function updateFeedbackStatus(id: string, status: string): Promise<boolean> {
+  try {
+    const client = supabase;
+    if (!client) return false;
+    const { error } = await client
+      .from('feedbacks')
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) {
+      console.warn('[Cloud] updateFeedbackStatus error:', error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn('[Cloud] updateFeedbackStatus failed:', err);
+    return false;
+  }
+}
+
+/** Delete a feedback row by id. */
+export async function deleteFeedbackRow(id: string): Promise<boolean> {
+  try {
+    const client = supabase;
+    if (!client) return false;
+    const { error } = await client
+      .from('feedbacks')
+      .delete()
+      .eq('id', id);
+    if (error) {
+      console.warn('[Cloud] deleteFeedbackRow error:', error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn('[Cloud] deleteFeedbackRow failed:', err);
+    return false;
+  }
 }

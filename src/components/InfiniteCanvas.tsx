@@ -10,6 +10,15 @@ import { CanvasTextNotes, CanvasImages } from './CanvasElements';
 import { CanvasPropertiesPanel } from './CanvasPropertiesPanel';
 import { EraserOverlay } from './EraserOverlay';
 import { invoke } from '../lib/electron-api';
+import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
+import { frameViewport, computeBBoxFromPanels } from '../lib/layout-engine';
+import { usePanelRegistry } from '../stores/usePanelRegistry';
+import { useMusicPlayerStore } from '../stores/useMusicPlayerStore';
+import { useBrowserStore } from '../stores/useBrowserStore';
+import { MusicPlayer } from './MusicPlayer';
+import { BrowserPreview } from './BrowserPreview';
+import ForgeNode from './ForgeNode';
+import BugReporter from './BugReporter';
 
 const MINIMAP_W = 190;
 const MINIMAP_H = 130;
@@ -46,6 +55,7 @@ export const InfiniteCanvas: React.FC = () => {
   const delegationLinks = useAppStore((s) => s.delegationLinks);
   const activeTool = useCanvasStore((s) => s.activeTool);
   const addElement = useCanvasStore((s) => s.addElement);
+  const selectionBox = useCanvasStore((s) => s.selectionBox);
   // const setActiveTool = useCanvasStore((s) => s.setActiveTool);
 
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -53,12 +63,24 @@ export const InfiniteCanvas: React.FC = () => {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [isPanning, setIsPanning] = useState(false);
+  const [isShiftPanning, setIsShiftPanning] = useState(false);
+  const [isSelecting, setIsSelecting] = useState(false);
   const panStart = useRef({ x: 0, y: 0, mx: 0, my: 0 });
+  const selectDragStart = useRef<{ x: number; y: number } | null>(null);
+  const selectDragCurrent = useRef<{ x: number; y: number } | null>(null);
+  const panRef = useRef(pan);
+  const zoomRef = useRef(zoom);
   const [winSize, setWinSize] = useState({ w: window.innerWidth, h: window.innerHeight });
   const [hoveredDot, setHoveredDot] = useState<string | null>(null);
   const [showMinimap, setShowMinimap] = useState(true);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pokeIdleRef = useRef<() => void>(() => {});
+
+  // ── Read layout motion tokens for canvas transform transition ──
+  const layoutMotion = usePanelRegistry((s) => s.layoutMotion);
+  const canvasTransition = layoutMotion.mode === 'spring' && !isPanning
+    ? 'transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)'
+    : 'none';
 
   const pokeIdle = useCallback(() => {
     setShowMinimap(true);
@@ -66,8 +88,63 @@ export const InfiniteCanvas: React.FC = () => {
     idleTimerRef.current = setTimeout(() => setShowMinimap(false), 1000);
   }, []);
 
-  // keep ref in sync so effects with stable deps can use it
+  // keep refs in sync so effects with stable deps can use them
   pokeIdleRef.current = pokeIdle;
+  panRef.current = pan;
+  zoomRef.current = zoom;
+
+  // ── Sync canvas elements (text notes, images) to panel registry for framing ──
+  const canvasElements = useCanvasStore((s) => s.elements);
+  useEffect(() => {
+    const registry = usePanelRegistry.getState();
+    // Collect current canvas element IDs that should be registered
+    const currentIds = new Set<string>();
+    for (let i = 0; i < canvasElements.length; i++) {
+      const el = canvasElements[i];
+      if (el.type !== 'text' && el.type !== 'image') continue;
+      const id = `canvas-${el.id}`;
+      currentIds.add(id);
+      if (!registry.panels[id]) {
+        registry.registerPanel({
+          id,
+          type: el.type === 'text' ? 'textnote' : 'image',
+          space: 'canvas',
+          x: el.x ?? 0,
+          y: el.y ?? 0,
+          width: el.width ?? 200,
+          height: el.height ?? 60,
+          minWidth: 40,
+          minHeight: 20,
+          defaultWidth: 200,
+          defaultHeight: 60,
+          participatesInAutoLayout: false,
+          participatesInFraming: true,
+          participatesInCollision: false,
+          draggable: false,
+          resizable: false,
+          focusable: false,
+          baseZIndex: 60,
+          persistent: false,
+        });
+      } else {
+        // Update position
+        registry.updatePanel(id, {
+          x: el.x ?? 0,
+          y: el.y ?? 0,
+          width: el.width ?? 200,
+          height: el.height ?? 60,
+        });
+      }
+    }
+    // Unregister elements no longer in the canvas
+    const allPanelIds = Object.keys(registry.panels);
+    for (let i = 0; i < allPanelIds.length; i++) {
+      const pid = allPanelIds[i];
+      if (pid.startsWith('canvas-') && !currentIds.has(pid)) {
+        registry.unregisterPanel(pid);
+      }
+    }
+  }, [canvasElements]);
 
   // initial show on mount, hide after 2s
   useEffect(() => {
@@ -98,7 +175,7 @@ export const InfiniteCanvas: React.FC = () => {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  // ── wheel zoom ─────────────────────────────────────────────────────────────
+  // ── wheel zoom (cursor-centered) ───────────────────────────────────────────
   useEffect(() => {
     const el = canvasRef.current;
     if (!el) return;
@@ -106,8 +183,17 @@ export const InfiniteCanvas: React.FC = () => {
       if ((e.target as HTMLElement).closest('[data-agent-card]')) return;
       e.preventDefault();
       pokeIdleRef.current();
-      const dz = e.deltaY > 0 ? 0.9 : 1.1;
-      setZoom((z) => Math.min(Math.max(z * dz, 0.1), 5));
+      const rect = el.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      setZoom((prevZoom) => {
+        const newZoom = Math.min(5, Math.max(0.1, prevZoom * (e.deltaY > 0 ? 0.9 : 1.1)));
+        setPan((prev) => ({
+          x: mouseX - (mouseX - prev.x) * (newZoom / prevZoom),
+          y: mouseY - (mouseY - prev.y) * (newZoom / prevZoom),
+        }));
+        return newZoom;
+      });
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
@@ -131,6 +217,78 @@ export const InfiniteCanvas: React.FC = () => {
       window.removeEventListener('mouseup', onUp);
     };
   }, [isPanning]);
+
+  // ── Shift key → shift-pan mode ────────────────────────────────────────────
+  useEffect(() => {
+    const onDown = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') {
+        setIsShiftPanning(true);
+      }
+    };
+    const onUp = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') {
+        setIsShiftPanning(false);
+      }
+    };
+    window.addEventListener('keydown', onDown);
+    window.addEventListener('keyup', onUp);
+    return () => {
+      window.removeEventListener('keydown', onDown);
+      window.removeEventListener('keyup', onUp);
+    };
+  }, []);
+
+  // ── Selection lasso (window-level mouse) ────────────────────────────────────
+  useEffect(() => {
+    if (!isSelecting) return;
+    const onMove = (e: MouseEvent) => {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const p = panRef.current;
+      const z = zoomRef.current;
+      const cx = (e.clientX - rect.left - p.x) / z;
+      const cy = (e.clientY - rect.top - p.y) / z;
+      selectDragCurrent.current = { x: cx, y: cy };
+      const start = selectDragStart.current;
+      if (!start) return;
+      useCanvasStore.getState().setSelectionBox({
+        x1: Math.min(start.x, cx),
+        y1: Math.min(start.y, cy),
+        x2: Math.max(start.x, cx),
+        y2: Math.max(start.y, cy),
+      });
+    };
+    const onUp = () => {
+      const start = selectDragStart.current;
+      const current = selectDragCurrent.current;
+      if (start && current) {
+        const store = useCanvasStore.getState();
+        const x1 = Math.min(start.x, current.x);
+        const y1 = Math.min(start.y, current.y);
+        const x2 = Math.max(start.x, current.x);
+        const y2 = Math.max(start.y, current.y);
+        // Find elements inside the selection box (AABB overlap)
+        const selected = store.elements.filter((el) => {
+          const ex = el.x ?? 0;
+          const ey = el.y ?? 0;
+          const ew = el.width ?? 40;
+          const eh = el.height ?? 20;
+          return ex < x2 && ex + ew > x1 && ey < y2 && ey + eh > y1;
+        });
+        store.setSelectedElementIds(selected.map((el) => el.id));
+        store.setSelectionBox(null);
+      }
+      selectDragStart.current = null;
+      selectDragCurrent.current = null;
+      setIsSelecting(false);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [isSelecting]);
 
   const handleCanvasMouseDown = useCallback((e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest('[data-agent-card]')) return;
@@ -183,6 +341,27 @@ export const InfiniteCanvas: React.FC = () => {
       activeElement.blur();
     }
     canvasRef.current?.focus();
+
+    // Shift-click always initiates panning
+    if (e.shiftKey) {
+      panStart.current = { x: e.clientX, y: e.clientY, mx: pan.x, my: pan.y };
+      setIsPanning(true);
+      return;
+    }
+
+    // Select mode: start lasso selection on empty space
+    if (tool === 'select') {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (rect) {
+        const cx = (e.clientX - rect.left - pan.x) / zoom;
+        const cy = (e.clientY - rect.top - pan.y) / zoom;
+        selectDragStart.current = { x: cx, y: cy };
+        selectDragCurrent.current = { x: cx, y: cy };
+        setIsSelecting(true);
+        store.clearSelection();
+      }
+      return;
+    }
 
     panStart.current = { x: e.clientX, y: e.clientY, mx: pan.x, my: pan.y };
     setIsPanning(true);
@@ -315,24 +494,16 @@ export const InfiniteCanvas: React.FC = () => {
   // ── Fit all agent cards to screen ──
   const fitToScreen = useCallback(() => {
     if (agents.length === 0) { setZoom(1); setPan({ x: 0, y: 0 }); return; }
-    // Compute bounding box of all agent positions
-    const CARD_W = 340; const CARD_H = 320; const GAP = 20;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const a of agents) {
-      if (a.x < minX) minX = a.x; if (a.y < minY) minY = a.y;
-      if (a.x + CARD_W > maxX) maxX = a.x + CARD_W;
-      if (a.y + CARD_H > maxY) maxY = a.y + CARD_H;
-    }
-    const contentW = maxX - minX + GAP;
-    const contentH = maxY - minY + GAP;
-    const scaleX = (window.innerWidth - 60) / contentW;
-    const scaleY = (window.innerHeight - 60) / contentH;
-    const fitZoom = Math.min(1, Math.min(scaleX, scaleY));
-    const centerX = (minX + maxX) / 2 * fitZoom;
-    const centerY = (minY + maxY) / 2 * fitZoom;
-    setZoom(fitZoom);
-    setPan({ x: window.innerWidth / 2 - centerX, y: window.innerHeight / 2 - centerY });
-  }, [agents]);
+    const panels = agents.map(a => ({
+      id: a.id, type: 'agent',
+      x: a.x, y: a.y,
+      width: a.width ?? 520, height: a.height ?? 360,
+    }));
+    const bbox = computeBBoxFromPanels(panels);
+    const { pan, zoom } = frameViewport(bbox, winSize.w, winSize.h);
+    setZoom(zoom);
+    setPan(pan);
+  }, [agents, winSize]);
 
   // ── minimap: viewport-synchronised (follows pan/zoom like a PiP) ─────
   const viewport = useMemo(() => {
@@ -459,6 +630,38 @@ export const InfiniteCanvas: React.FC = () => {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // ── P/O/T → canvas tools; Delete/Backspace → remove selected ────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      // Don't capture if focus is inside an input/textarea
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      if (key === 'p') {
+        e.preventDefault();
+        useCanvasStore.getState().setActiveTool('pen');
+      } else if (key === 'o') {
+        e.preventDefault();
+        useCanvasStore.getState().setActiveTool('shape');
+      } else if (key === 't') {
+        e.preventDefault();
+        useCanvasStore.getState().setActiveTool('text');
+      } else if (key === 'delete' || key === 'backspace') {
+        const store = useCanvasStore.getState();
+        if (store.selectedElementIds.length > 0) {
+          e.preventDefault();
+          const ids = [...store.selectedElementIds];
+          ids.forEach((id) => store.removeElement(id));
+          store.clearSelection();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const handleMinimapClick = useCallback((e: React.MouseEvent) => {
     const rect = minimapRef.current?.getBoundingClientRect();
     if (!rect) return;
@@ -495,17 +698,18 @@ export const InfiniteCanvas: React.FC = () => {
       {/* Grid background */}
       <div
         style={{
-          position: 'absolute', inset: 0, zIndex: 0, pointerEvents: 'none',
+          position: 'absolute', inset: 0, zIndex: Z_BASE_LAYERS.canvasBackground, pointerEvents: 'none',
           backgroundImage: 'none',
           backgroundSize: '40px 40px',
           transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
           transformOrigin: '0 0',
+          transition: canvasTransition,
         }}
       />
       {/* Panning background — z-index 1, below agents at z-index 10 */}
       <div
         style={{
-          position: 'absolute', inset: 0, zIndex: 1, cursor: isPanning ? 'grabbing' : 'grab',
+          position: 'absolute', inset: 0, zIndex: 1, cursor: isPanning ? 'grabbing' : isShiftPanning ? 'grab' : 'default',
         }}
         onMouseDown={handleCanvasMouseDown}
         onTouchStart={handleTouchStart}
@@ -519,7 +723,8 @@ export const InfiniteCanvas: React.FC = () => {
           transformOrigin: '0 0',
           width: 0, height: 0,
           position: 'relative',
-          zIndex: 10,
+          zIndex: Z_BASE_LAYERS.agentDefault,
+          transition: isPanning ? 'none' : canvasTransition,
         }}
       >
         {/* Delegation link lines */}
@@ -595,12 +800,16 @@ export const InfiniteCanvas: React.FC = () => {
             onClose={() => removeAgent(agent.id)}
           />
         ))}
+        <MusicPlayer />
+        <BrowserPreview />
+        <ForgeNode />
+        <BugReporter />
       </div>
 
       {/* Drawing layer — below agents in select mode, above when pen active */}
       <div style={{
         position: 'absolute', inset: 0,
-        zIndex: activeTool === 'pen' ? 50 : 8,
+        zIndex: activeTool === 'pen' ? 50 : Z_BASE_LAYERS.drawingInactive,
         pointerEvents: activeTool === 'pen' ? 'auto' : 'none',
       }}>
         <DrawingLayer pan={pan} zoom={zoom} />
@@ -608,7 +817,7 @@ export const InfiniteCanvas: React.FC = () => {
       {/* Vector layer — same strategy */}
       <div style={{
         position: 'absolute', inset: 0,
-        zIndex: activeTool === 'shape' ? 51 : 9,
+        zIndex: activeTool === 'shape' ? 51 : Z_BASE_LAYERS.vectorInactive,
         pointerEvents: activeTool === 'shape' ? 'auto' : 'none',
       }}>
         <VectorLayer pan={pan} zoom={zoom} />
@@ -618,12 +827,30 @@ export const InfiniteCanvas: React.FC = () => {
         position: 'absolute', inset: 0, overflow: 'visible',
         transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
         transformOrigin: '0 0',
-        zIndex: 60, pointerEvents: 'none',
+        zIndex: Z_BASE_LAYERS.canvasElements, pointerEvents: 'none',
       }}>
         <CanvasTextNotes />
+        {/* Selection rectangle */}
+        {selectionBox && (() => {
+          const x = Math.min(selectionBox.x1, selectionBox.x2);
+          const y = Math.min(selectionBox.y1, selectionBox.y2);
+          const w = Math.abs(selectionBox.x2 - selectionBox.x1);
+          const h = Math.abs(selectionBox.y2 - selectionBox.y1);
+          return (
+            <div style={{
+              position: 'absolute',
+              left: x, top: y,
+              width: w, height: h,
+              border: '1.5px dashed #F4A261',
+              background: 'rgba(244, 162, 97, 0.08)',
+              pointerEvents: 'none',
+              zIndex: 999,
+            }} />
+          );
+        })()}
       </div>
       {/* Dropped images — below everything */}
-      <div style={{ position: 'absolute', inset: 0, zIndex: 7, pointerEvents: 'none' }}>
+      <div style={{ position: 'absolute', inset: 0, zIndex: Z_BASE_LAYERS.canvasImages, pointerEvents: 'none' }}>
         <CanvasImages />
       </div>
 
@@ -644,7 +871,7 @@ export const InfiniteCanvas: React.FC = () => {
             border: '1px solid rgba(234, 244, 244, 0.07)',
             overflow: 'hidden',
             cursor: 'crosshair',
-            zIndex: 100,
+            zIndex: Z_BASE_LAYERS.minimap,
             boxShadow: '0 8px 32px rgba(0,0,0,0.35)',
             opacity: showMinimap ? 1 : 0,
             pointerEvents: showMinimap ? 'auto' : 'none',
@@ -745,7 +972,7 @@ export const InfiniteCanvas: React.FC = () => {
             padding: '4px', borderRadius: 'var(--radius-sm)',
             background: 'rgba(14,26,20,0.85)',
             border: '1px solid rgba(234,244,244,0.1)',
-            zIndex: 110,
+            zIndex: Z_BASE_LAYERS.zoomControls,
             userSelect: 'none',
           }}
         >
@@ -764,14 +991,14 @@ export const InfiniteCanvas: React.FC = () => {
         )}
 
         {/* Canvas workspace toolbar (left) */}
-        <div style={{ position: 'absolute', inset: 0, zIndex: 200, pointerEvents: 'none' }}>
+        <div style={{ position: 'absolute', inset: 0, zIndex: Z_BASE_LAYERS.chromeToolbar, pointerEvents: 'none' }}>
           <div style={{ pointerEvents: 'auto' }}>
             <CanvasToolbar />
           </div>
         </div>
 
         {/* Unified canvas tool panel (right) — properties per tool */}
-        <div style={{ position: 'absolute', inset: 0, zIndex: 200, pointerEvents: 'none' }}>
+        <div style={{ position: 'absolute', inset: 0, zIndex: Z_BASE_LAYERS.chromeToolbar, pointerEvents: 'none' }}>
           <div style={{ pointerEvents: 'auto' }}>
             <CanvasPropertiesPanel />
           </div>
@@ -780,7 +1007,7 @@ export const InfiniteCanvas: React.FC = () => {
         {/* Drop zone overlay — handles file drag-and-drop */}
         <div
           style={{
-            position: 'absolute', inset: 0, zIndex: 200,
+            position: 'absolute', inset: 0, zIndex: Z_BASE_LAYERS.chromeToolbar,
             pointerEvents: 'none',
           }}
           onDragOver={(e) => { e.preventDefault(); }}

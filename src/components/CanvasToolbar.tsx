@@ -5,6 +5,7 @@
 import React from 'react';
 import { MousePointer, Pen, Square, Type, Eraser } from 'lucide-react';
 import { useCanvasStore, type CanvasTool } from '../stores/useCanvasStore';
+import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
 import { useThemeStore } from '../stores/useThemeStore';
 
 interface ToolBtnProps {
@@ -54,7 +55,7 @@ export const CanvasToolbar: React.FC = () => {
       className="glass"
       style={{
         position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)',
-        zIndex: 200,
+        zIndex: Z_BASE_LAYERS.chromeToolbar,
         display: 'flex', flexDirection: 'column', gap: 1,
         padding: 6,
         borderRadius: 10,

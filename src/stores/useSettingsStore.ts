@@ -5,6 +5,8 @@ import { DEFAULT_SETTINGS, BUILTIN_PROVIDERS } from '../types/settings';
 import { useAuthStore } from './useAuthStore';
 import { saveUserPreferences, upsertProviderConfig, upsertMcpServer } from '../lib/db';
 
+export type UpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'ready';
+
 function mergeProviders(custom: AgentProvider[]): AgentProvider[] {
   return [...BUILTIN_PROVIDERS, ...custom];
 }
@@ -22,14 +24,21 @@ interface SettingsState extends Settings {
   setTerminalFontSize: (size: number) => void;
   setHibernationEnabled: (on: boolean) => void;
   setCloudAgents: (on: boolean) => void;
-  setProviderMode: (id: string, mode: 'cloud' | 'local') => void;
   setGridSnap: (on: boolean) => void;
   setShowGrid: (on: boolean) => void;
   setAudioInputDevice: (deviceId: string) => void;
   setGroqApiKey: (key: string) => void;
   setGroqOnSTTFailure: (on: boolean) => void;
   setInstantStart: (on: boolean) => void;
+  setShortcut: (actionId: string, combo: string) => void;
+  setPttKey: (combo: string) => void;
   getGroqApiKey: () => string;
+  setAdmin: (on: boolean) => void;
+  // ── Update management ────────────────────────────────────
+  updateStatus: UpdateStatus;
+  downloadPercent: number;
+  availableVersion: string;
+  triggerSystemUpdate: () => Promise<void>;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -38,6 +47,31 @@ export const useSettingsStore = create<SettingsState>()(
       ...DEFAULT_SETTINGS,
       defaultProvider: 'cmd',
       providers: mergeProviders([]),
+      // ── Update management (transient, not persisted) ──────
+      updateStatus: 'idle',
+      downloadPercent: 0,
+      availableVersion: '',
+      triggerSystemUpdate: async () => {
+        const { onUpdateStatus, checkForUpdates, triggerUpdate } = await import('../lib/electron-api');
+        // Wire live status listener
+        const unsub = onUpdateStatus((payload) => {
+          set({
+            updateStatus: payload.status as UpdateStatus,
+            downloadPercent: payload.percent,
+            availableVersion: payload.version || '',
+          });
+        });
+        // Fire a check first
+        const check = await checkForUpdates();
+        if (check.success && check.updateInfo) {
+          set({ updateStatus: 'available', availableVersion: check.updateInfo.version || '' });
+          // Download immediately
+          await triggerUpdate();
+        } else {
+          set({ updateStatus: 'idle' });
+        }
+        unsub();
+      },
       setApiKey: (provider, key, endpoint) =>
         set((state) => {
           const existing = state.apiKeys.findIndex((k) => k.provider === provider);
@@ -64,23 +98,28 @@ export const useSettingsStore = create<SettingsState>()(
       setTerminalFontSize: (size) => set({ terminalFontSize: size }),
       setHibernationEnabled: (on) => set({ hibernationEnabled: on }),
       setCloudAgents: (on) => set({ cloudAgents: on }),
-      setProviderMode: (id, mode) =>
-        set((state) => ({ providerModes: { ...state.providerModes, [id]: mode } })),
       setGridSnap: (on) => set({ gridSnap: on }),
       setShowGrid: (on) => set({ showGrid: on }),
       setAudioInputDevice: (deviceId) => set({ audioInputDeviceId: deviceId }),
       setGroqApiKey: (key) => set({ groqApiKey: key }),
       setGroqOnSTTFailure: (on) => set({ enableGroqOnSTTFailure: on }),
       setInstantStart: (on) => set({ instantStart: on }),
+      setShortcut: (actionId, combo) =>
+        set((state) => ({ shortcuts: { ...state.shortcuts, [actionId]: combo } })),
+      setPttKey: (combo) => set({ pttKey: combo }),
+      setAdmin: (on) => set({ isAdmin: on }),
       getGroqApiKey: () => get().groqApiKey,
     }),
     {
       name: 'orch-settings',
-      version: 10, // v10: added groqApiKey + enableGroqOnSTTFailure
+      version: 11, // v11: removed providerModes (VPS decommissioned)
       migrate: (persisted: any, version: number) => {
         // Carry over custom providers from previous version if any
         const oldCustom = version < 7 ? [] : (persisted.customProviders || []);
-        return { ...DEFAULT_SETTINGS, ...persisted, providers: mergeProviders(oldCustom), customProviders: oldCustom };
+        // v11: strip stale providerModes key from localStorage
+        const clean = { ...persisted };
+        delete clean.providerModes;
+        return { ...DEFAULT_SETTINGS, ...clean, providers: mergeProviders(oldCustom), customProviders: oldCustom };
       },
       partialize: (state) => ({
         apiKeys: state.apiKeys,
@@ -90,13 +129,14 @@ export const useSettingsStore = create<SettingsState>()(
         terminalFontSize: state.terminalFontSize,
         hibernationEnabled: state.hibernationEnabled,
         cloudAgents: state.cloudAgents,
-        providerModes: state.providerModes,
         gridSnap: state.gridSnap,
         showGrid: state.showGrid,
         audioInputDeviceId: state.audioInputDeviceId,
         groqApiKey: state.groqApiKey,
         enableGroqOnSTTFailure: state.enableGroqOnSTTFailure,
         instantStart: state.instantStart,
+        shortcuts: state.shortcuts,
+        pttKey: state.pttKey,
       }),
     }
   )
@@ -122,7 +162,6 @@ useSettingsStore.subscribe((state) => {
       terminal_font_size: state.terminalFontSize,
       default_provider: state.defaultProvider,
       cloud_agents: state.cloudAgents,
-      provider_modes: state.providerModes,
       audio_input_device: state.audioInputDeviceId,
     }).catch((err) => console.warn('[Cloud] Failed to sync settings:', err));
 

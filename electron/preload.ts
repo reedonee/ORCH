@@ -33,14 +33,48 @@ contextBridge.exposeInMainWorld('electronAPI', {
   workspaceExists: (workspacePath: string) =>
     ipcRenderer.invoke('workspace_exists', { workspacePath }),
 
-  // ── File Sync ─────────────────────────────────────────────
-  fileSyncStart: (workspaceId: string, localPath: string, vpsUrl: string) =>
-    ipcRenderer.invoke('filesync_start', { workspaceId, localPath, vpsUrl }),
-  fileSyncStop: () => ipcRenderer.invoke('filesync_stop'),
-  fileSyncGetState: () => ipcRenderer.invoke('filesync_get_state'),
-  onFileSyncStateChanged: (callback: (state: any) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, state: any) => callback(state);
-    ipcRenderer.on('filesync_state_changed', handler);
-    return () => ipcRenderer.removeListener('filesync_state_changed', handler);
+  // ── Browser ────────────────────────────────────────────────
+  browserNavigate: (id: string, url: string) =>
+    ipcRenderer.invoke('browser_navigate', { id, url }),
+  browserGoBack: (id: string) => ipcRenderer.invoke('browser_go_back', { id }),
+  browserGoForward: (id: string) => ipcRenderer.invoke('browser_go_forward', { id }),
+  browserRefresh: (id: string) => ipcRenderer.invoke('browser_refresh', { id }),
+  onBrowserNavigate: (id: string, callback: (url: string) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, url: string) => callback(url);
+    ipcRenderer.on(`browser_nav_${id}`, handler);
+    return () => ipcRenderer.removeListener(`browser_nav_${id}`, handler);
+  },
+  onBrowserGoBack: (id: string, callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on(`browser_back_${id}`, handler);
+    return () => ipcRenderer.removeListener(`browser_back_${id}`, handler);
+  },
+  onBrowserGoForward: (id: string, callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on(`browser_fwd_${id}`, handler);
+    return () => ipcRenderer.removeListener(`browser_fwd_${id}`, handler);
+  },
+  onBrowserRefresh: (id: string, callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on(`browser_refresh_${id}`, handler);
+    return () => ipcRenderer.removeListener(`browser_refresh_${id}`, handler);
+  },
+
+  // ── Music Player ───────────────────────────────────────────
+  musicResolveUrl: (url: string) => ipcRenderer.invoke('music_resolve_url', { url }),
+  musicSearch: (query: string, source?: string) => ipcRenderer.invoke('music_search', { query, source }),
+  musicPlaylist: (url: string) => ipcRenderer.invoke('music_playlist', { url }),
+  musicStreamUrl: (url: string) => ipcRenderer.invoke('music_stream_url', { url }),
+  musicScAuthUrl: () => ipcRenderer.invoke('music_sc_auth_url'),
+  musicScAuthToken: (code: string) => ipcRenderer.invoke('music_sc_auth_token', { code }),
+  musicScUser: (token: string) => ipcRenderer.invoke('music_sc_user', { token }),
+
+  // ── Auto-Updater ──────────────────────────────────────────
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  triggerUpdate: () => ipcRenderer.invoke('trigger-update'),
+  onUpdateStatus: (callback: (payload: { status: string; version: string | null; percent: number }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: any) => callback(data);
+    ipcRenderer.on('update-status', handler);
+    return () => ipcRenderer.removeListener('update-status', handler);
   },
 });

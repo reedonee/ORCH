@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { WebglAddon } from '@xterm/addon-webgl';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { invoke, listen } from '../lib/electron-api';
 import { useThemeStore } from '../stores/useThemeStore';
@@ -33,6 +32,22 @@ export const CliTerminal: React.FC<CliTerminalProps> = ({ sessionId }) => {
   const bytesRef = useRef(0);
   const statusRef = useRef(status);
   statusRef.current = status;
+
+  // ── Force all xterm internal elements transparent ────────
+  const [cssInjected, setCssInjected] = useState(false);
+  useEffect(() => {
+    if (cssInjected) return;
+    const style = document.createElement('style');
+    style.textContent = `
+      .xterm, .xterm-viewport, .xterm-rows, .xterm-rows > div,
+      .xterm .xterm-screen, .xterm .xterm-scroll-area,
+      .xterm .xterm-rows > div > span {
+        background: transparent !important;
+      }
+    `;
+    document.head.appendChild(style);
+    setCssInjected(true);
+  }, [cssInjected]);
 
   // ── Wait for container to have layout before mounting terminal ──
   useEffect(() => {
@@ -68,7 +83,7 @@ export const CliTerminal: React.FC<CliTerminalProps> = ({ sessionId }) => {
     let mounted = true;
     let unlistenTerm: (() => void) | null = null;
 
-    const bg = theme.terminal.bg || '#050304';
+    const bg = 'transparent';
     const fg = theme.terminal.fg || '#EAF4F4';
     const cursor = theme.terminal.cursor || '#F4A261';
     const selection = theme.terminal.selection || 'rgba(244, 162, 97, 0.3)';
@@ -136,12 +151,6 @@ export const CliTerminal: React.FC<CliTerminalProps> = ({ sessionId }) => {
     terminalRef.current = term;
 
     term.open(containerRef.current);
-
-    try {
-      term.loadAddon(new WebglAddon());
-    } catch {
-      // WebGL unavailable
-    }
 
     try {
       term.loadAddon(new WebLinksAddon());
@@ -248,7 +257,7 @@ export const CliTerminal: React.FC<CliTerminalProps> = ({ sessionId }) => {
       brightCyan:   t.brightCyan || '#A8E0E0', brightWhite:  t.brightWhite || '#F5E6ED',
     };
     term.options.theme = {
-      background: theme.terminal.bg || '#050304',
+      background: 'transparent',
       foreground: theme.terminal.fg || '#EAF4F4',
       cursor: theme.terminal.cursor || '#F4A261',
       selectionBackground: theme.terminal.selection || 'rgba(244,162,97,0.3)',
@@ -270,7 +279,7 @@ export const CliTerminal: React.FC<CliTerminalProps> = ({ sessionId }) => {
           display: 'flex', alignItems: 'center', gap: 4,
           padding: '4px 8px', fontSize: 11,
           fontFamily: "'JetBrains Mono', monospace",
-          background: bg, borderBottom: `1px solid ${fg}15`,
+          background: 'var(--surface-alt)', borderBottom: `1px solid ${fg}15`,
           flexWrap: 'wrap', userSelect: 'none',
         }}>
           {SLASH_COMMANDS.map((cmd) => (
@@ -296,7 +305,6 @@ export const CliTerminal: React.FC<CliTerminalProps> = ({ sessionId }) => {
         ref={containerRef}
         style={{
           flex: 1, minHeight: 0,
-          background: bg,
         }}
       />
     </div>

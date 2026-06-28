@@ -3,15 +3,12 @@ import { useAppStore } from '../stores/useAppStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useWorkspaceStore } from '../stores/useWorkspaceStore';
-import { vpsClient } from '../lib/vps-client';
 import { PROVIDER_ICONS } from './icons/ProviderIcon';
 import { AppLogo } from './icons/AppLogo';
-import { Settings, X, Radio, HardDrive, User, Maximize2, Minimize2, FolderOpen, ChevronDown, RotateCcw } from 'lucide-react';
+import { Settings, X, Maximize2, Minimize2, FolderOpen, ChevronDown, RotateCcw, Hammer } from 'lucide-react';
 import { pickAgentName } from '../lib/agent-names';
-import { findNextPosition, findViewportPosition, snapToGrid } from '../lib/canvas-utils';
-import { LAYOUT_ENGINE_SPEC } from '../stores/useWorkspaceStore';
 import { getMcpUrl } from '../lib/electron-api';
-import type { VpsStatus } from '../lib/vps-client';
+import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
 
 // Premium thin plus
 const PlusIcon: React.FC<{ size?: number }> = ({ size = 14 }) => (
@@ -59,7 +56,6 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
   const [showWsDropdown, setShowWsDropdown] = useState(false);
   const [creating, setCreating] = useState<string | null>(null);
   const [mcpUrl, setMcpUrl] = useState<string | null>(null);
-  const [vpsStatus, setVpsStatus] = useState<VpsStatus>({ connected: false, health: null, error: null, latency: null });
   const [isFullscreen, setIsFullscreen] = useState(() => !!document.fullscreenElement);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const wsDropdownRef = useRef<HTMLDivElement>(null);
@@ -67,14 +63,6 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
   // Fetch MCP server URL on mount
   useEffect(() => {
     getMcpUrl().then(setMcpUrl).catch(() => {});
-  }, []);
-
-  // Ping VPS on mount and every 30s
-  useEffect(() => {
-    const ping = () => vpsClient.ping().then(setVpsStatus).catch(() => {});
-    ping();
-    const id = setInterval(ping, 30000);
-    return () => clearInterval(id);
   }, []);
 
   // Fullscreen change listener
@@ -141,30 +129,10 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
     const launchMode = provider.launchMode ?? 'embedded';
     const kind = provider.shell === false ? 'cli' : 'shell';
 
-    // Map provider to VPS pre-installed tool
-    const VPS_TOOLS: Record<string, string> = {
-      'claude-code': 'claude',
-      'codex': 'codex',
-      'hermes': 'hermes',
-      'opencode': 'opencode',
-      'cursor': 'agent',
-    };
-    const vpsTool = VPS_TOOLS[providerId];
-
     try {
       let termId: string | null = null;
 
-      if (vpsTool) {
-        // ── VPS tmux session (persistent) ──
-        const agentVpsId = `${providerId}-${Date.now()}`;
-        const envPrefix = Object.keys(env).length > 0
-          ? Object.entries(env).map(([k, v]) => `export ${k}=${v}`).join(' && ') + ' && '
-          : '';
-        const result = await vpsClient.createTerminal(agentVpsId, `${envPrefix}${vpsTool}`);
-        if (result.created) {
-          termId = `vps:${agentVpsId}`;
-        }
-      } else if (launchMode === 'embedded') {
+      if (launchMode === 'embedded') {
         // ── Local node-pty session ──
         termId = await createTerminal(
           name,
@@ -178,15 +146,9 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
       }
 
       const store = useAppStore.getState();
-      const { agents, viewportPan, viewportZoom, viewportWinSize } = store;
-      // First agent — use smart cards grid (LAYOUT_ENGINE_SPEC snap system)
-      // so it lands on the proper 32px grid at the correct start position
-      const pos = agents.length === 0
-        ? {
-            x: snapToGrid(LAYOUT_ENGINE_SPEC.arrangements.startX, LAYOUT_ENGINE_SPEC.arrangements.gridSnap),
-            y: snapToGrid(LAYOUT_ENGINE_SPEC.chrome.topOffset + LAYOUT_ENGINE_SPEC.arrangements.tidyPadding, LAYOUT_ENGINE_SPEC.arrangements.gridSnap),
-          }
-        : findViewportPosition(agents, viewportPan, viewportZoom, viewportWinSize);
+      const { agents } = store;
+      // Spawn at the layout engine's computed position
+      const pos = useWorkspaceStore.getState().spawnPosition();
       const x = pos.x;
       const y = pos.y;
 
@@ -218,7 +180,7 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
         top: 26,
         left: '50%',
         transform: 'translateX(-50%)',
-        zIndex: 1000,
+        zIndex: Z_BASE_LAYERS.pillBar,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
@@ -284,9 +246,9 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
                 left: '50%', transform: 'translateX(-50%)',
                 minWidth: 220, padding: 6,
                 borderRadius: 'var(--radius-lg)',
-                zIndex: 2000,
+                zIndex: Z_BASE_LAYERS.dropdown,
                 background: 'var(--menu-bg)',
-                border: '1px solid rgba(234, 244, 244, 0.06)',
+                border: '1px solid var(--border-dim)',
                 boxShadow: '0 8px 32px rgba(0,0,0,0.35)',
               }}
             >
@@ -309,7 +271,7 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
                           display: 'flex', alignItems: 'center', gap: 10,
                           width: '100%', padding: '8px 10px',
                           borderRadius: 'var(--radius-md)',
-                          background: active ? 'rgba(244,162,97,0.10)' : 'transparent',
+                          background: active ? 'color-mix(in srgb, var(--brand) 10%, transparent)' : 'transparent',
                           border: 'none',
                           color: active ? 'var(--accent)' : 'var(--text)',
                           cursor: active ? 'default' : 'pointer',
@@ -318,8 +280,8 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
                           fontFamily: 'inherit',
                           transition: 'background var(--anim-fast)',
                         }}
-                        onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'rgba(244,162,97,0.12)'; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.background = active ? 'rgba(244,162,97,0.10)' : 'transparent'; }}
+                        onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'color-mix(in srgb, var(--brand) 12%, transparent)'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = active ? 'color-mix(in srgb, var(--brand) 10%, transparent)' : 'transparent'; }}
                       >
                         <FolderOpen size={13} style={{ flexShrink: 0, opacity: 0.6 }} />
                         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
@@ -335,7 +297,7 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
                   No recent workspaces
                 </div>
               )}
-              <div style={{ height: 1, background: 'rgba(234,244,244,0.06)', margin: '4px 0' }} />
+              <div style={{ height: 1, background: 'var(--border-dim)', margin: '4px 0' }} />
               <button
                 onClick={() => { onOpenWorkspace(); setShowWsDropdown(false); }}
                 style={{
@@ -344,14 +306,14 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
                   borderRadius: 'var(--radius-md)',
                   background: 'transparent',
                   border: 'none',
-                  color: 'var(--accent)',
+                  color: 'var(--brand)',
                   cursor: 'pointer',
                   fontSize: 12, fontWeight: 600,
                   textAlign: 'left',
                   fontFamily: 'inherit',
                   transition: 'background var(--anim-fast)',
                 }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(244,162,97,0.12)'; }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'color-mix(in srgb, var(--brand) 12%, transparent)'; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
               >
                 <RotateCcw size={13} />
@@ -384,6 +346,7 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
               fontWeight: 700, fontSize: 12,
               gap: 4,
               color: 'var(--brand)',
+              fontFamily: 'var(--font-accent)',
             }}
           >
             <PlusIcon /> New
@@ -397,13 +360,13 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
                 left: '50%', transform: 'translateX(-50%)',
                 minWidth: 200, padding: 6,
                 borderRadius: 'var(--radius-lg)',
-                zIndex: 2000,
+                zIndex: Z_BASE_LAYERS.dropdown,
                 background: 'var(--menu-bg)',
-                border: '1px solid rgba(234, 244, 244, 0.06)',
+                border: '1px solid var(--border-dim)',
                 boxShadow: '0 8px 32px rgba(0,0,0,0.35)',
               }}
             >
-              {providers.map((p) => {
+              {providers.filter((p) => p.id !== 'cmd' && p.id !== 'bash' && p.id !== 'wsl').map((p) => {
                 const isCreating = creating === p.id;
                 return (
                   <button
@@ -423,13 +386,13 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
                       fontFamily: 'inherit',
                       transition: 'background var(--anim-fast)',
                     }}
-                    onMouseEnter={(e) => { if (!isCreating) e.currentTarget.style.background = 'rgba(244,162,97,0.12)'; }}
+                    onMouseEnter={(e) => { if (!isCreating) e.currentTarget.style.background = 'color-mix(in srgb, var(--brand) 12%, transparent)'; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                   >
                     <span style={{
                       width: 28, height: 28, borderRadius: 6,
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      flexShrink: 0, color: 'var(--accent)',
+                      flexShrink: 0, color: 'var(--brand)',
                     }}>
                       {(() => {
                         const ProviderSvg = PROVIDER_ICONS[p.id];
@@ -439,12 +402,9 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
                       })()}
                     </span>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                        {p.command}
-                      </div>
+                      <div style={{ fontSize: 13, fontWeight: 600, fontFamily: 'var(--font-accent)' }}>{p.name}</div>
                     </div>
-                    {isCreating && <span style={{ fontSize: 11, color: 'var(--accent)' }}>…</span>}
+                    {isCreating && <span style={{ fontSize: 11, color: 'var(--brand)' }}>…</span>}
                   </button>
                 );
               })}

@@ -1,5 +1,8 @@
 import { create } from 'zustand';
 import { invoke } from '../lib/electron-api';
+import { usePanelRegistry } from './usePanelRegistry';
+import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
+import { frameViewport } from '../lib/layout-engine';
 
 export interface Agent {
   id: string;
@@ -115,6 +118,28 @@ export const useAppStore = create<AppState>((set, get) => ({
       color: agent.color,
     } });
     set((state) => ({ agents: [...state.agents, agent] }));
+    // Register with the panel registry
+    usePanelRegistry.getState().registerPanel({
+      id: agent.id,
+      type: 'agent',
+      space: 'canvas',
+      x: agent.x,
+      y: agent.y,
+      width: agent.width ?? 520,
+      height: agent.height ?? 360,
+      minWidth: 260,
+      minHeight: 180,
+      defaultWidth: 520,
+      defaultHeight: 360,
+      participatesInAutoLayout: true,
+      participatesInFraming: true,
+      participatesInCollision: true,
+      draggable: true,
+      resizable: true,
+      focusable: true,
+      baseZIndex: Z_BASE_LAYERS.agentDefault,
+      agentRef: agent.id,
+    });
   },
 
   removeAgent: async (id) => {
@@ -127,14 +152,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       agents: state.agents.filter((a) => a.id !== id),
       selectedAgentId: state.selectedAgentId === id ? null : state.selectedAgentId,
     }));
+    usePanelRegistry.getState().unregisterPanel(id);
   },
 
-  updateAgentPosition: (id, x, y) =>
+  updateAgentPosition: (id, x, y) => {
     set((state) => ({
       agents: state.agents.map((a) => (a.id === id ? { ...a, x, y } : a)),
-    })),
+    }));
+    usePanelRegistry.getState().updatePanel(id, { x, y });
+  },
 
-  updateAgentPositions: (positions) =>
+  updateAgentPositions: (positions) => {
     set((state) => {
       const byId = positions.reduce<Record<string, { x: number; y: number }>>((acc, position) => {
         acc[position.id] = { x: position.x, y: position.y };
@@ -146,17 +174,25 @@ export const useAppStore = create<AppState>((set, get) => ({
           return next ? { ...agent, x: next.x, y: next.y } : agent;
         }),
       };
-    }),
+    });
+    // Sync to registry
+    const registry = usePanelRegistry.getState();
+    for (let i = 0; i < positions.length; i++) {
+      registry.updatePanel(positions[i].id, { x: positions[i].x, y: positions[i].y });
+    }
+  },
 
   updateAgentTerminalId: (id, terminalId) =>
     set((state) => ({
       agents: state.agents.map((a) => (a.id === id ? { ...a, terminalId } : a)),
     })),
 
-  updateAgentSize: (id, width, height) =>
+  updateAgentSize: (id, width, height) => {
     set((state) => ({
       agents: state.agents.map((a) => (a.id === id ? { ...a, width, height } : a)),
-    })),
+    }));
+    usePanelRegistry.getState().updatePanel(id, { width, height });
+  },
 
   updateAgentStatus: (id, status) =>
     set((state) => ({
@@ -208,12 +244,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { viewportWinSize } = get();
     const cw = agent.width || 520;
     const ch = agent.height || 360;
-    const target = {
-      x: viewportWinSize.w / 2 - (agent.x + cw / 2),
-      y: viewportWinSize.h / 2 - (agent.y + ch / 2),
-      zoom: 1,
-    };
-    set({ focusTarget: target, selectedAgentId: agent.id });
+    // Frame the single agent through the engine's zoom-correct framer so the
+    // focus respects the [0.35, 1.0] guardrails instead of a hardcoded zoom:1.
+    const { pan, zoom } = frameViewport(
+      { minX: agent.x, minY: agent.y, maxX: agent.x + cw, maxY: agent.y + ch },
+      viewportWinSize.w,
+      viewportWinSize.h,
+    );
+    set({ focusTarget: { x: pan.x, y: pan.y, zoom }, selectedAgentId: agent.id });
   },
 
   clearFocusTarget: () => set({ focusTarget: null }),
@@ -256,9 +294,41 @@ export const useAppStore = create<AppState>((set, get) => ({
       selectedAgentId: null,
       delegationLinks: [],
     });
+    // Re-register all agents with the panel registry
+    const registry = usePanelRegistry.getState();
+    const agents = data.agents ?? [];
+    for (let i = 0; i < agents.length; i++) {
+      const a = agents[i];
+      registry.registerPanel({
+        id: a.id,
+        type: 'agent',
+        space: 'canvas',
+        x: a.x,
+        y: a.y,
+        width: a.width ?? 520,
+        height: a.height ?? 360,
+        minWidth: 260,
+        minHeight: 180,
+        defaultWidth: 520,
+        defaultHeight: 360,
+        participatesInAutoLayout: true,
+        participatesInFraming: true,
+        participatesInCollision: true,
+        draggable: true,
+        resizable: true,
+        focusable: true,
+        baseZIndex: Z_BASE_LAYERS.agentDefault,
+        agentRef: a.id,
+      });
+    }
   },
 
   resetAppState: () => {
+    // Unregister all agent panels from registry before clearing
+    const currentAgents = get().agents;
+    for (let i = 0; i < currentAgents.length; i++) {
+      usePanelRegistry.getState().unregisterPanel(currentAgents[i].id);
+    }
     set({
       agents: [],
       selectedAgentId: null,

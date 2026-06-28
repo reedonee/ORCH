@@ -8,18 +8,23 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "release": "electron-builder --publish always",
+    "release:dry": "electron-builder --publish never"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@supabase/supabase-js": "^2.108.2",
+    "@xterm/addon-canvas": "^0.7.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^5.5.0",
     "chokidar": "^5.0.0",
+    "electron-updater": "^6.8.9",
     "lucide-react": "^1.20.0",
     "pg": "^8.22.0",
+    "play-dl": "^1.9.7",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "ws": "^8.21.0",
@@ -55,6 +60,11 @@
       "dist/**/*",
       "dist-electron/**/*"
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "reedonee",
+      "repo": "ORCH"
+    },
     "win": {
       "target": "nsis",
       "icon": "ORCH LOGO1.ico"

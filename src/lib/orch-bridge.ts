@@ -10,8 +10,6 @@ import { useProviderStore } from '../stores/useProviderStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useWorkspaceStore } from '../stores/useWorkspaceStore';
 import { pickAgentName } from './agent-names';
-import { findNextPosition, findViewportPosition, snapToGrid } from './canvas-utils';
-import { vpsClient } from './vps-client';
 import { LAYOUT_ENGINE_SPEC } from '../stores/useWorkspaceStore';
 
 const AGENT_COLORS = ['#F4A261', '#4EA8DE', '#6BBF8A', '#E76F51', '#B48BC9', '#F4C97A', '#7BC9C9', '#EAF4F4'];
@@ -116,41 +114,8 @@ export function createBridge(): BridgeAPI {
       const agentId = crypto.randomUUID();
 
       if (launchMode === 'embedded') {
-        const providerModes = useSettingsStore.getState().providerModes;
-        const workspacePath = useWorkspaceStore.getState().currentWorkspacePath;
-        const effectiveMode: 'cloud' | 'local' = providerModes[provider.id] ?? (provider.type === 'custom' ? 'local' : 'cloud');
-
-        if (effectiveMode === 'cloud' && workspacePath) {
-          // Cloud mode — spawn on VPS via tmux
-          // Derive workspace_id from the folder name, matching the file sync
-          // derivation in useWorkspaceFileSync.ts
-          const folderName = workspacePath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'workspace';
-          const workspaceId = folderName
-            .toLowerCase()
-            .replace(/[^a-z0-9_-]/g, '-')
-            .replace(/-+/g, '-')
-            .replace(/^-|-$/g, '')
-            || `ws-${Date.now()}`;
-          try {
-            // Inject saved API keys as env vars before the tool command
-            const envPrefix = Object.keys(env).length > 0
-              ? Object.entries(env).map(([k, v]) => `export ${k}=${v}`).join(' && ') + ' && '
-              : '';
-            const cmd = `${envPrefix}${provider.command}`;
-            const result = await vpsClient.createTerminal(agentId, cmd, workspaceId);
-            if (result.created) {
-              termId = agentId; // VPS sessions use agent_id as the terminal identifier
-            } else {
-              console.warn(`[Bridge] VPS session creation returned false, falling back to local`);
-            }
-          } catch (err: any) {
-            console.warn(`[Bridge] VPS spawn failed (${err?.message}), falling back to local`);
-          }
-        }
-
-        // Fallback to local if cloud didn't work
-        if (!termId) {
-          termId = await terminalStore.createTerminal(
+        // Always spawn locally — VPS has been decommissioned
+        termId = await terminalStore.createTerminal(
           agentName,
           `${agentName} Terminal`,
           provider.command,
@@ -162,17 +127,9 @@ export function createBridge(): BridgeAPI {
           contextSnapshot || undefined,
         );
       }
-      }
 
-      const { viewportPan, viewportZoom, viewportWinSize } = useAppStore.getState();
-      // First agent — use smart cards grid (LAYOUT_ENGINE_SPEC snap system)
-      // so it lands on the proper 32px grid at the correct start position
-      const pos = agents.length === 0
-        ? {
-            x: snapToGrid(LAYOUT_ENGINE_SPEC.arrangements.startX, LAYOUT_ENGINE_SPEC.arrangements.gridSnap),
-            y: snapToGrid(LAYOUT_ENGINE_SPEC.chrome.topOffset + LAYOUT_ENGINE_SPEC.arrangements.tidyPadding, LAYOUT_ENGINE_SPEC.arrangements.gridSnap),
-          }
-        : findViewportPosition(agents, viewportPan, viewportZoom, viewportWinSize);
+      // Spawn at the layout engine's computed position
+      const pos = useWorkspaceStore.getState().spawnPosition();
       const newAgent = {
         id: agentId,
         name: agentName,
@@ -215,23 +172,35 @@ export function setupBridge() {
     listen('delegation_created', (payload: any) => {
       const { taskId, title, delegationDepth, parentTaskId } = payload;
       const store = useAppStore.getState();
-      // Find the source agent from the event — the IPC message carries it
-      if (parentTaskId) {
-        // This is a sub-delegation, find the original parent
-        const parentLink = store.delegationLinks.find(l => l.taskId === parentTaskId);
-        if (parentLink) {
-          store.addDelegationLink({
-            id: `deleg_${taskId}`,
-            fromAgentId: parentLink.toAgentId,
-            toAgentId: '', // will be filled when claimed
-            taskId,
-            title,
-            status: 'pending',
-            createdAt: Date.now(),
-          });
-        }
+
+      // For top-level delegations (no parent), create a link with unknown source
+      if (!parentTaskId) {
+        store.addDelegationLink({
+          id: `deleg_${taskId}`,
+          fromAgentId: '',
+          toAgentId: '',
+          taskId,
+          title: title || 'Delegated task',
+          status: 'pending',
+          createdAt: Date.now(),
+        });
+        console.log(`[Bridge] Delegation created: ${title} (task=${taskId})`);
+        return;
       }
-      // Print to console for now; visual links will be rendered by the canvas
+
+      // Sub-delegation: find parent link and chain from its target
+      const parentLink = store.delegationLinks.find(l => l.taskId === parentTaskId);
+      if (parentLink) {
+        store.addDelegationLink({
+          id: `deleg_${taskId}`,
+          fromAgentId: parentLink.toAgentId,
+          toAgentId: '',
+          taskId,
+          title: title || 'Sub-delegation',
+          status: 'pending',
+          createdAt: Date.now(),
+        });
+      }
       console.log(`[Bridge] Delegation: ${title} (depth=${delegationDepth})`);
     });
 

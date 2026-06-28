@@ -27,6 +27,12 @@ export interface ThemeTokens {
     brand: string;      // pillbar logo + primary action text
     menuBg: string;     // pillbar dropdown/tooltip background
   };
+  fonts: {
+    ui: string;         // body text
+    heading: string;    // headings
+    accent: string;     // accent labels, buttons, terminals
+    mono: string;       // code, terminal output
+  };
   glass: { bg: string; border: string; blur: string; hover: string; active: string; };
   terminal: {
     bg: string; fg: string; cursor: string; selection: string;
@@ -38,6 +44,21 @@ export interface ThemeTokens {
   spacing: { xs: string; sm: string; md: string; lg: string; xl: string; '2xl': string; };
   animation: { fast: string; normal: string; slow: string; spring: string; };
 }
+
+const sharedFonts = {
+  ui: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+  heading: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+  accent: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+  mono: "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace",
+};
+
+// Eden gets a refined editorial typography system
+const edenFonts: typeof sharedFonts = {
+  ui: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+  heading: "'Cormorant Garamond', Georgia, serif",
+  accent: "'Space Grotesk', 'Inter', sans-serif",
+  mono: "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace",
+};
 
 const shared = {
   radius: { sm: '4px', md: '10px', lg: '16px', xl: '24px', pill: '9999px' },
@@ -82,6 +103,7 @@ export const edenTheme: ThemeTokens = {
     hover: 'rgba(30, 58, 58, 0.45)',
     active: 'rgba(30, 58, 58, 0.60)',
   },
+  fonts: edenFonts,
   terminal: {
     bg: '#0E1A14', fg: '#EAF4F4', cursor: '#F4A261', selection: 'rgba(244, 162, 97, 0.28)',
     black: '#122018', red: '#E76F51', green: '#6BBF8A', yellow: '#F4C97A',
@@ -116,12 +138,12 @@ export const twilightTheme: ThemeTokens = {
     text: '#FFF2E6',          // Sunset Glow — warm off-white
     textSecondary: '#D4C7D6',  // muted orchid-gray
     textMuted: '#8E7C9A',     // dusk-like muted
-    accent: '#E76F51',        // Vibrant Coral — primary CTA
-    accentDim: '#C4553A',
-    accentGlow: 'rgba(231, 111, 81, 0.30)',
+    accent: '#B48BC9',        // Orchid Purple — soft ethereal CTA
+    accentDim: '#8B6FA8',
+    accentGlow: 'rgba(180, 139, 201, 0.30)',
     border: 'rgba(245, 230, 237, 0.12)',
     borderDim: 'rgba(245, 230, 237, 0.05)',
-    error: '#E76F51',         // coral = error on purpose (rare)
+    error: '#E0406B',         // rose — warm contrast to purple accent
     warning: '#F4C97A',       // pale amber
     success: '#7BC9C9',       // teal — from eden, works here too
     info: '#A84A74',          // Twilight Fuchsia
@@ -135,8 +157,9 @@ export const twilightTheme: ThemeTokens = {
     hover: 'rgba(245, 230, 237, 0.18)',
     active: 'rgba(245, 230, 237, 0.25)',
   },
+  fonts: sharedFonts,
   terminal: {
-    bg: '#1C1326', fg: '#FFF2E6', cursor: '#E76F51', selection: 'rgba(231, 111, 81, 0.30)',
+    bg: '#1C1326', fg: '#FFF2E6', cursor: '#B48BC9', selection: 'rgba(180, 139, 201, 0.30)',
     black: '#1C1326', red: '#E76F51', green: '#6BBF8A', yellow: '#F4C97A',
     blue: '#7BC9C9', magenta: '#A84A74', cyan: '#4EA8DE', white: '#FFF2E6',
     brightBlack: '#3D2E4D', brightRed: '#F0907A', brightGreen: '#8AD8A4',
@@ -146,7 +169,7 @@ export const twilightTheme: ThemeTokens = {
   shadows: {
     sm: '0 4px 12px rgba(0, 0, 0, 0.40)', md: '0 10px 30px rgba(0, 0, 0, 0.50)',
     lg: '0 24px 60px rgba(0, 0, 0, 0.55)', xl: '0 40px 90px rgba(0, 0, 0, 0.65)',
-    glow: '0 0 30px rgba(231, 111, 81, 0.25), 0 0 60px rgba(168, 74, 116, 0.12)',
+    glow: '0 0 30px rgba(180, 139, 201, 0.25), 0 0 60px rgba(168, 74, 116, 0.12)',
   },
   ...shared,
 };
@@ -185,6 +208,7 @@ export const crimsonTheme: ThemeTokens = {
     hover: 'rgba(230, 46, 67, 0.08)',
     active: 'rgba(230, 46, 67, 0.15)',
   },
+  fonts: sharedFonts,
   terminal: {
     bg: '#0B0506', fg: '#F5EBEF', cursor: '#E62E43', selection: 'rgba(230, 46, 67, 0.3)',
     black: '#1C1214', red: '#C62828', green: '#2E7D32', yellow: '#EF6C00',

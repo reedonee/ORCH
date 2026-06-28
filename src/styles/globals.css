@@ -1,5 +1,5 @@
 /* ─── ORCH Global Styles ──────────────────────────────────────── */
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Edu+AU+VIC+WA+NT+Pre:wght@400..700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 
 *, *::before, *::after {
   margin: 0;
@@ -52,6 +52,8 @@
   --anim-normal: 250ms ease;
   --anim-slow: 400ms ease;
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-heading: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-accent: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
 }
 
@@ -127,6 +129,10 @@ html, body, #root {
 @keyframes listeningCursor {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
+}
+@keyframes shimmer {
+  0% { backgroundPosition: '200% 0' }
+  100% { backgroundPosition: '-200% 0' }
 }
 
 .animate-fade-in { animation: fadeIn var(--anim-normal) ease; }

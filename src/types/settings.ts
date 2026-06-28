@@ -38,7 +38,6 @@ export interface Settings {
   terminalFontSize: number;
   hibernationEnabled: boolean;
   cloudAgents: boolean;
-  providerModes: Record<string, 'cloud' | 'local'>;
   gridSnap: boolean;
   showGrid: boolean;
   audioInputDeviceId: string;  // '' = system default
@@ -47,6 +46,12 @@ export interface Settings {
   /** When local Whisper returns empty/gibberish, retry with Groq */
   enableGroqOnSTTFailure: boolean;
   instantStart: boolean;
+  /** User-configurable keyboard shortcuts: actionId → key combo string */
+  shortcuts: Record<string, string>;
+  /** Push-to-talk key combo (e.g. 'Ctrl+E') */
+  pttKey: string;
+  /** Admin passkey flag — gates Feedback Inbox tab in ForgeNode */
+  isAdmin: boolean;
 }
 
 export const BUILTIN_PROVIDERS: AgentProvider[] = [
@@ -176,11 +181,18 @@ export const DEFAULT_SETTINGS: Settings = {
   terminalFontSize: 13,
   hibernationEnabled: false,
   cloudAgents: false,
-  providerModes: {},
   gridSnap: true,
   showGrid: false,
   audioInputDeviceId: '',
   groqApiKey: '',
   enableGroqOnSTTFailure: false,
   instantStart: false,
+  shortcuts: {
+    'toggle-browser': 'Ctrl+Shift+B',
+    'toggle-music': 'Ctrl+Shift+M',
+    'toggle-feedback': 'Ctrl+Shift+F',
+    'toggle-forge': 'Ctrl+Shift+G',
+  },
+  pttKey: 'Ctrl+E',
+  isAdmin: false,
 };

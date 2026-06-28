@@ -1,16 +1,15 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { GlassPanel } from './GlassPanel';
-import { TerminalView } from './TerminalView';
 import { CliTerminal } from './CliTerminal';
-import { VpsTerminal } from './VpsTerminal';
-import { ErrorBoundary } from './ErrorBoundary';
 import { useAppStore, type Agent } from '../stores/useAppStore';
+import { usePanelRegistry } from '../stores/usePanelRegistry';
 import { useThemeStore } from '../stores/useThemeStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
+import { usePanelDrag } from '../hooks/usePanelDrag';
+import { computePanelZIndex } from '../lib/z-stack-manager';
 import { BUILTIN_PROVIDERS } from '../types/settings';
 import { X, Minus, Maximize2, RefreshCw, Moon } from 'lucide-react';
-import { snapToGrid } from '../lib/canvas-utils';
 import { wakeAgent } from '../lib/electron-api';
 import { PROVIDER_ICONS } from './icons/ProviderIcon';
 
@@ -32,29 +31,10 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
   const selectedAgentId = useAppStore((s) => s.selectedAgentId);
   const setSelectedAgent = useAppStore((s) => s.setSelectedAgent);
   const brandColor = useThemeStore((s) => s.theme.colors.brand);
+  const themeColors = useThemeStore((s) => s.theme.colors);
   const createTerminal = useTerminalStore((s) => s.createTerminal);
 
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragPos, setDragPos] = useState({ x: agent.x, y: agent.y });
-  const [isResizing, setIsResizing] = useState(false);
   const [minimized, setMinimized] = useState(false);
-  const dragRef = useRef({ startX: 0, startY: 0, startMX: 0, startMY: 0 });
-  const resizeRef = useRef({ startX: 0, startY: 0, startW: DEFAULT_W, startH: DEFAULT_H });
-  const posRef = useRef({ x: agent.x, y: agent.y });
-  const [cardW, setCardW] = useState(agent.width || DEFAULT_W);
-  const [cardH, setCardH] = useState(agent.height || DEFAULT_H);
-  const sizeRef = useRef({ w: cardW, h: cardH });
-
-  // keep ref & dragPos in sync with store when not dragging
-  useEffect(() => {
-    posRef.current = { x: agent.x, y: agent.y };
-    if (!isDragging) setDragPos({ x: agent.x, y: agent.y });
-  }, [agent.x, agent.y, isDragging]);
-
-  useEffect(() => {
-    setCardW(agent.width || DEFAULT_W);
-    setCardH(agent.height || DEFAULT_H);
-  }, [agent.width, agent.height]);
 
   // ── Barge-In flash effect ────────────────────────────────────
   const [flash, setFlash] = useState(false);
@@ -70,32 +50,32 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
     return () => window.removeEventListener('bargein-interrupt', handler);
   }, [agent.id]);
 
-  // ── drag (batched: local state during move, commit to store on release) ──
-  useEffect(() => {
-    if (!isDragging) return;
-    const onMove = (e: MouseEvent) => {
-      const dx = e.clientX - dragRef.current.startX;
-      const dy = e.clientY - dragRef.current.startY;
-      const nx = dragRef.current.startMX + dx;
-      const ny = dragRef.current.startMY + dy;
-      posRef.current = { x: nx, y: ny };
-      setDragPos({ x: nx, y: ny });
-      // NOT updating zustand here — commit once on mouseup
-    };
-    const onUp = () => {
-      setIsDragging(false);
-      const snappedX = snapToGrid(posRef.current.x);
-      const snappedY = snapToGrid(posRef.current.y);
-      posRef.current = { x: snappedX, y: snappedY };
-      updateAgentPosition(agent.id, snappedX, snappedY);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, [isDragging, agent.id, updateAgentPosition]);
+  // ── Unified drag/resize via panel registry ─────────────────
+  const {
+    dragHandlers,
+    resizeHandlers,
+    positionStyle,
+    transition,
+    isDragging,
+    isResizing,
+  } = usePanelDrag({
+    panelId: agent.id,
+    snapToGrid: 32,
+  });
+
+  // ── Compute z-index from central stack manager ─────────────
+  const registry = usePanelRegistry();
+  const focusPanel = usePanelRegistry((s) => s.focusPanel);
+  const zIndex = computePanelZIndex(
+    agent.id,
+    'canvas',
+    10,                          // baseZIndex for unselected agents
+    true,                        // focusable
+    registry.activePanelId,
+    registry.dragPanelId,
+    registry.resizePanelId,
+    registry.zStack,
+  );
 
   // ── restart claude-code session with --continue ────────────────────────────
   const resumeClaudeSession = useCallback(async () => {
@@ -145,47 +125,8 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
     }
   }, [agent, createTerminal]);
 
-  const handleDragStart = useCallback((e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('.no-drag')) return;
-    e.preventDefault();
-    dragRef.current = { startX: e.clientX, startY: e.clientY, startMX: posRef.current.x, startMY: posRef.current.y };
-    setIsDragging(true);
-  }, []);
-
-  // keep ref in sync
-  useEffect(() => { sizeRef.current = { w: cardW, h: cardH }; }, [cardW, cardH]);
-
-  // ── resize ────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!isResizing) return;
-    const onMove = (e: MouseEvent) => {
-      const dw = e.clientX - resizeRef.current.startX;
-      const dh = e.clientY - resizeRef.current.startY;
-      const newW = Math.max(MIN_W, resizeRef.current.startW + dw);
-      const newH = Math.max(MIN_H, resizeRef.current.startH + dh);
-      setCardW(newW);
-      setCardH(newH);
-    };
-    const onUp = () => {
-      setIsResizing(false);
-      updateAgentSize(agent.id, sizeRef.current.w, sizeRef.current.h);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-  }, [isResizing, agent.id, updateAgentSize]);
-
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    resizeRef.current = { startX: e.clientX, startY: e.clientY, startW: cardW, startH: cardH };
-    setIsResizing(true);
-  }, [cardW, cardH]);
-
-  const displayW = minimized ? 240 : cardW;
-  const displayH = minimized ? 48 : cardH;
-  const displayX = isDragging ? dragPos.x : agent.x;
-  const displayY = isDragging ? dragPos.y : agent.y;
+  const displayW = minimized ? 240 : (positionStyle.width as number || DEFAULT_W);
+  const displayH = minimized ? 48 : (positionStyle.height as number || DEFAULT_H);
 
   return (
     <div
@@ -193,13 +134,13 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
       data-agent-card="true"
       style={{
         position: 'absolute',
-        left: displayX,
-        top: displayY,
-        transition: `${isDragging || isResizing ? 'none' : 'left 0.25s ease, top 0.25s ease'} all var(--anim-normal)`,
+        left: positionStyle.left,
+        top: positionStyle.top,
+        transition,
         width: displayW,
         height: displayH,
         boxSizing: 'border-box',
-        zIndex: isDragging || isResizing ? 1000 : agent.id === selectedAgentId ? 100 : 10,
+        zIndex,
         cursor: isDragging ? 'grabbing' : isResizing ? 'nwse-resize' : 'default',
       }}
     >
@@ -212,7 +153,7 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
           flexDirection: 'column',
           overflow: 'hidden',
           borderRadius: 'var(--radius-lg)',
-          background: 'linear-gradient(135deg, rgba(20, 20, 20, 0.55) 0%, rgba(10, 10, 10, 0.65) 100%)',
+          background: `linear-gradient(135deg, ${themeColors.bgAlt}CC 0%, ${themeColors.bg}E6 100%)`,
           border: flash
             ? '1px solid rgba(255, 68, 68, 0.7)'
             : selectedAgentId === agent.id
@@ -240,17 +181,20 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
             e.stopPropagation();
             // Select agent on header click (does not focus terminal)
             setSelectedAgent(agent.id);
+            // Elevate in the z-stack + mark as active for the focus layer
+            focusPanel(agent.id);
             if (agent.status === 'sleeping') wakeAgent(agent.id);
-            handleDragStart(e);
+            // Delegate to unified drag handler
+            dragHandlers.onMouseDown(e);
           }}
           style={{
             display: 'flex', alignItems: 'center', gap: 8,
             padding: '0 12px',
             height: 40,
-            background: '#222524',
+            background: 'var(--surface-alt)',
             borderBottom: minimized
               ? 'none'
-              : '1px solid rgba(255, 255, 255, 0.06)',
+              : '1px solid var(--border-dim)',
             cursor: 'grab',
             userSelect: 'none',
             WebkitFontSmoothing: 'antialiased',
@@ -265,15 +209,15 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
                 : <span style={{ width: 8, height: 8, borderRadius: '50%', display: 'block', background: 'var(--brand)', boxShadow: '0 0 6px color-mix(in srgb, var(--brand) 33%, transparent)' }} />;
             })()}
           </div>
-          <span style={{ fontFamily: "'JetBrains Mono', 'Cascadia Code', monospace", fontSize: 13, letterSpacing: 0.3, color: 'rgba(234, 244, 244, 0.88)', fontWeight: 600, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <span style={{ fontFamily: "'JetBrains Mono', 'Cascadia Code', monospace", fontSize: 13, letterSpacing: 0.3, color: 'var(--text)', fontWeight: 600, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {agent.name}
           </span>
           <button className="glass-btn no-drag" onClick={(e) => { e.stopPropagation(); setMinimized(!minimized); }}
-            style={{ width: 24, height: 24, padding: 0, fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.06)', color: 'rgba(234, 244, 244, 0.72)' }}>
+            style={{ width: 24, height: 24, padding: 0, fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--glass-bg)', border: '1px solid var(--glass-border)', color: 'var(--text-secondary)' }}>
             {minimized ? <Maximize2 size={12} /> : <Minus size={12} />}
           </button>
           <button className="glass-btn no-drag" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); onClose(); }}
-            style={{ width: 24, height: 24, padding: 0, fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.06)', color: 'rgba(234, 244, 244, 0.72)' }}>
+            style={{ width: 24, height: 24, padding: 0, fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--glass-bg)', border: '1px solid var(--glass-border)', color: 'var(--text-secondary)' }}>
             <X size={12} />
           </button>
         </div>
@@ -289,19 +233,8 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
                 <Moon size={20} />
                 <span>Agent sleeping — click to wake</span>
               </div>
-            ) : agent.terminalId ? (
-              <ErrorBoundary>
-                {agent.terminalId?.startsWith('vps:') ? (
-                  <VpsTerminal
-                    agentId={agent.terminalId.replace('vps:', '')}
-                    onSessionEnded={onClose}
-                  />
-                ) : agent.provider && ['claude-code', 'codex', 'opencode', 'hermes'].includes(agent.provider) ? (
+            ) : agent.terminalId && agent.provider && ['claude-code', 'codex', 'opencode', 'hermes'].includes(agent.provider) ? (
                   <CliTerminal sessionId={agent.terminalId} />
-                ) : (
-                  <TerminalView sessionId={agent.terminalId} />
-                )}
-              </ErrorBoundary>
             ) : agent.provider && ['cursor', 'antigravity'].includes(agent.provider) ? (
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)', fontSize: 13, textAlign: 'center', padding: 20 }}>
                 {agent.provider === 'cursor'
@@ -352,7 +285,7 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
         {!minimized && (
           <div
             className="no-drag"
-            onMouseDown={handleResizeStart}
+            onMouseDown={resizeHandlers.onMouseDown}
             style={{
               position: 'absolute', bottom: 0, right: 0,
               width: 20, height: 20,

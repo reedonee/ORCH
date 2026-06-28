@@ -1,0 +1,1 @@
+can you please make a photo in this art style no user interface change the scene to a ULTRA claiming ULTRA HIGH DOPAMINE night landscape focusing on the deep midnight blue, BEAUTIFUL range of colors, LESS IS MORE!

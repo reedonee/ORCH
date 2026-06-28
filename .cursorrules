@@ -1,41 +1,58 @@
-# ── ORCH Cloud MCP ─────────────────────────────────────────────────
-# This file enables automatic MCP server discovery.
-# External IDE agents (Claude Code, Cursor, etc.) read this to
-# connect to ORCH's VPS-hosted tool server.
+# ── ORCH Local MCP ─────────────────────────────────────────────────
+# ORCH runs its own MCP server inside the Electron main process
+# via SSE transport. It exposes canvas state, agent control,
+# terminal ops, event bus, blackboard delegation, and memory recall.
+#
+# The MCP server auto-starts when ORCH launches and the port is
+# dynamic (random available). Agent terminals get the MCP URL
+# injected automatically via temp config files or CLI registration.
+#
+# For external IDE agents (Claude Code, Cursor, Cline):
+# Run `hermes mcp add orch --url http://127.0.0.1:<PORT>/sse`
+# or check the ORCH settings panel for the current port.
+#
+# Tools available via the local MCP server:
+#   - canvas_get_state, canvas_get_elements
+#   - canvas_get_agent, canvas_move_agent
+#   - canvas_send_message, canvas_read_output
+#   - canvas_create_agent, canvas_remove_agent
+#   - canvas_list_sessions
+#   - canvas_emit_event, canvas_get_events, canvas_subscribe
+#   - delegate_task, claim_task, complete_task, fail_task
+#   - query_tasks, get_task
+#   - canvas_store_artifact, canvas_store_memory
+#   - canvas_get_artifacts, canvas_get_artifact, canvas_recall
+#   - list_providers
 
 ORCH MCP Server:
-  description: "ORCH's VPS-hosted Model Context Protocol server with filesystem, sandbox, and vector memory tools"
-  transport: "http"
-  base_url: "http://51.170.134.197:8000"
+  description: "ORCH's local Model Context Protocol server with canvas, agent, event bus, blackboard, and memory tools"
+  transport: "sse"
+  base_url: "http://127.0.0.1:PORT"  # dynamic port — check ORCH settings
   endpoints:
-    list_tools:
-      method: GET
-      path: /api/mcp/tools
-      description: "Returns all available tools with JSON schemas"
-    call_tool:
-      method: POST
-      path: /api/mcp/call?name={tool_name}
-      body:
-        arguments: {}
-      description: "Execute a tool by name with arguments"
+    sse: /sse  # SSE stream endpoint
+    messages: /messages  # POST messages endpoint
   tools:
-    - read_file
-    - write_file
-    - search_files
-    - sandbox_exec
-    - memory_search
-    - memory_store
-    - agent_think
-  terminals:
-    - create: POST /api/agents/{id}/terminal (body: {"tool": "claude"})
-    - read: GET /api/agents/{id}/terminal
-    - write: POST /api/agents/{id}/terminal/input (body: {"text": "..."})
-    - list: GET /api/sessions
-  workspace: /workspace/
-  pre_installed:
-    - claude v2.1.185 (/usr/bin/claude)
-    - codex v0.141.0 (/usr/bin/codex)
-    - hermes v0.17.0 (/usr/local/bin/hermes)
-    - opencode v1.17.9 (/usr/bin/opencode)
-    - Node.js 20 LTS
-    - tmux 3.5a
+    - canvas_get_state
+    - canvas_get_elements
+    - canvas_get_agent
+    - canvas_move_agent
+    - canvas_send_message
+    - canvas_read_output
+    - canvas_create_agent
+    - canvas_remove_agent
+    - canvas_list_sessions
+    - canvas_emit_event
+    - canvas_get_events
+    - canvas_subscribe
+    - delegate_task
+    - claim_task
+    - complete_task
+    - fail_task
+    - query_tasks
+    - get_task
+    - canvas_store_artifact
+    - canvas_store_memory
+    - canvas_get_artifacts
+    - canvas_get_artifact
+    - canvas_recall
+    - list_providers

@@ -1,16 +1,18 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
+import { useThemeStore } from '../stores/useThemeStore';
+import { useSettingsStore } from '../stores/useSettingsStore';
+import { useWorkspaceStore } from '../stores/useWorkspaceStore';
+import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
 import { useVoiceInput, type VoiceState } from '../hooks/useVoiceInput';
 import { executeAppCommand, type AppCommand } from '../lib/agent-commands';
 import { listen } from '../lib/electron-api';
 import { parseCommand } from '../lib/voice-parser';
 
 // ── Brand constants ────────────────────────────────────────────
-const BRAND_AMBER = '#F4A261';
-const BRAND_BLUE  = '#4EA8DE';
-const AMBER_RGB   = '244,162,97';
-const BLUE_RGB    = '78,168,222';
+// These are populated at render time from the active theme.
+// Defaults used as fallback before theme is loaded.
 
 const SUGGESTIONS = [
   'Open Hermes ...',
@@ -37,8 +39,22 @@ export const ChatBar: React.FC = () => {
   const bargeInTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { agents, selectedAgentId } = useAppStore();
   const { writeToTerminal } = useTerminalStore();
+  const brandColor = useThemeStore((s) => s.theme.colors.brand);
+  const infoColor = useThemeStore((s) => s.theme.colors.info);
+  // Parse brand hex to RGB for rgba usage
+  const brandHex = brandColor.replace('#', '');
+  const brandR = parseInt(brandHex.slice(0,2), 16) || 244;
+  const brandG = parseInt(brandHex.slice(2,4), 16) || 162;
+  const brandB = parseInt(brandHex.slice(4,6), 16) || 97;
+  const brandRGB = `${brandR},${brandG},${brandB}`;
+  const infoHex = infoColor.replace('#', '');
+  const infoR = parseInt(infoHex.slice(0,2), 16) || 78;
+  const infoG = parseInt(infoHex.slice(2,4), 16) || 168;
+  const infoB = parseInt(infoHex.slice(4,6), 16) || 222;
+  const infoRGB = `${infoR},${infoG},${infoB}`;
 
   // ── Voice Input Integration ──────────────────────────────────
+  // Remove unused icon imports
   const handleVoiceTranscript = useCallback(async (text: string) => {
     const command: AppCommand = { kind: 'message', text };
     await executeAppCommand(command);
@@ -91,16 +107,30 @@ export const ChatBar: React.FC = () => {
     return () => { running = false; cancelAnimationFrame(rafRef.current); };
   }, [voiceState]);
 
-  // ── Push-to-Talk: Ctrl+E (or Cmd+E) ──────────────────────
+  // ── Push-to-Talk: configurable key ────────────────────────
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'e' || e.key === 'E')) {
+      const pttCombo = useSettingsStore.getState().pttKey;
+      const parts = pttCombo.split('+');
+      const needsCtrl = parts.includes('Ctrl');
+      const needsShift = parts.includes('Shift');
+      const keyPart = parts.filter((p) => p !== 'Ctrl' && p !== 'Shift')[0] || '';
+      if ((!needsCtrl || e.ctrlKey || e.metaKey) &&
+          (!needsShift || e.shiftKey) &&
+          (e.key === keyPart || e.key === keyPart.toUpperCase() || e.key === keyPart.toLowerCase())) {
         e.preventDefault();
         startCapture();
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'e' || e.key === 'E')) {
+      const pttCombo = useSettingsStore.getState().pttKey;
+      const parts = pttCombo.split('+');
+      const needsCtrl = parts.includes('Ctrl');
+      const needsShift = parts.includes('Shift');
+      const keyPart = parts.filter((p) => p !== 'Ctrl' && p !== 'Shift')[0] || '';
+      if ((!needsCtrl || e.ctrlKey || e.metaKey) &&
+          (!needsShift || e.shiftKey) &&
+          (e.key === keyPart || e.key === keyPart.toUpperCase() || e.key === keyPart.toLowerCase())) {
         stopCapture();
       }
     };
@@ -200,10 +230,11 @@ export const ChatBar: React.FC = () => {
           const store = useAppStore.getState();
           const id = crypto.randomUUID();
           const name = command.providerId.charAt(0).toUpperCase() + command.providerId.slice(1);
+          const pos = useWorkspaceStore.getState().spawnPosition();
           await store.addAgent({
             id, name, role: 'Developer', status: 'idle',
-            provider: command.providerId, x: 100 + store.agents.length * 30,
-            y: 100 + store.agents.length * 30, color: BRAND_AMBER,
+            provider: command.providerId, x: pos.x,
+            y: pos.y, color: brandColor,
           });
         }
       }
@@ -228,7 +259,7 @@ export const ChatBar: React.FC = () => {
     (activeWaveform[0] + activeWaveform[1] + activeWaveform[2] + activeWaveform[3]) / 4
   );
 
-  const barRgb   = isSpeaking ? BLUE_RGB : AMBER_RGB;
+  const barRgb   = isSpeaking ? infoRGB : brandRGB;
   const showGlow = voiceActive || isBargeIn;
 
   // Border glow: intensity varies with voice volume
@@ -246,7 +277,7 @@ export const ChatBar: React.FC = () => {
       style={{
         position: 'fixed', bottom: 28, left: '50%', transform: 'translateX(-50%)',
         width: 540, maxWidth: 'calc(100vw - 48px)', height: 44,
-        zIndex: 1000,
+        zIndex: Z_BASE_LAYERS.pillBar,
         display: 'flex', alignItems: 'center', gap: 12,
         padding: '0 18px',
         borderRadius: 9999,
@@ -279,8 +310,8 @@ export const ChatBar: React.FC = () => {
         }}>
           <div style={{
             width: 8, height: 8, borderRadius: '50%',
-            background: hasActivity ? BRAND_AMBER : 'rgba(255,255,255,0.2)',
-            boxShadow: hasActivity ? `0 0 6px ${BRAND_AMBER}80` : 'none',
+            background: hasActivity ? brandColor : 'rgba(255,255,255,0.2)',
+            boxShadow: hasActivity ? `0 0 6px ${brandColor}80` : 'none',
           }} />
         </div>
 
@@ -298,7 +329,7 @@ export const ChatBar: React.FC = () => {
               position: 'absolute', inset: 0,
               borderRadius: '50%',
               border: '2px solid rgba(244,162,97,0.12)',
-              borderTopColor: BRAND_AMBER,
+              borderTopColor: brandColor,
               animation: 'spin 0.7s linear infinite',
             }} />
             {/* Pulsing center dot */}
@@ -306,8 +337,8 @@ export const ChatBar: React.FC = () => {
               position: 'absolute', top: '50%', left: '50%',
               transform: 'translate(-50%, -50%)',
               width: 5, height: 5, borderRadius: '50%',
-              background: BRAND_AMBER,
-              boxShadow: `0 0 6px ${BRAND_AMBER}80`,
+              background: brandColor,
+              boxShadow: `0 0 6px ${brandColor}80`,
               animation: 'pulse 1s ease-in-out infinite',
             }} />
           </div>
@@ -323,7 +354,7 @@ export const ChatBar: React.FC = () => {
           ...(isBargeIn ? { filter: 'brightness(1.6)' } : {}),
         }}>
           {[0, 1, 2, 3].map((i) => {
-            const barColor = isSpeaking ? BRAND_BLUE : BRAND_AMBER;
+            const barColor = isSpeaking ? infoColor : brandColor;
             const h = isListening && activeWaveform.length >= 4
               ? Math.max(3, activeWaveform[i] * 18)
               : 4 + i * 3;
@@ -361,7 +392,7 @@ export const ChatBar: React.FC = () => {
             position: 'absolute', left: 0, top: '50%', transform: 'translateY(-50%)',
             fontFamily: "'JetBrains Mono', 'Cascadia Code', monospace",
             fontSize: 13, letterSpacing: 0.8,
-            color: `${BRAND_AMBER}B3`,
+            color: `${brandColor}B3`,
             pointerEvents: 'none', whiteSpace: 'nowrap',
             animation: 'pulse 1.5s ease-in-out infinite',
           }}>
@@ -375,7 +406,7 @@ export const ChatBar: React.FC = () => {
             position: 'absolute', left: 0, top: '50%', transform: 'translateY(-50%)',
             fontFamily: "'JetBrains Mono', 'Cascadia Code', monospace",
             fontSize: 13, letterSpacing: 0.5,
-            color: `${BRAND_AMBER}99`,
+            color: `${brandColor}99`,
             pointerEvents: 'none', whiteSpace: 'nowrap',
           }}>
             Processing<span style={{ animation: 'listeningCursor 0.9s step-end infinite', marginLeft: 1 }}>…</span>
@@ -431,7 +462,7 @@ export const ChatBar: React.FC = () => {
             fontFamily: "'JetBrains Mono', 'Cascadia Code', monospace",
             fontSize: 13, letterSpacing: 0.3,
             color: 'rgba(234, 244, 244, 0.88)',
-            caretColor: BRAND_AMBER,
+            caretColor: brandColor,
             position: 'relative', zIndex: 1,
           }}
         />

@@ -8,6 +8,7 @@ import {
   Undo2, Redo2, PaintBucket, Frame, Circle, RectangleHorizontal,
 } from 'lucide-react';
 import { useCanvasStore, type CanvasTool, type ShapeType } from '../stores/useCanvasStore';
+import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
 import { useThemeStore } from '../stores/useThemeStore';
 
 // ── Sub-components ──────────────────────────────────────────────
@@ -88,7 +89,7 @@ export const CanvasPropertiesPanel: React.FC = () => {
     <div
       style={{
         position: 'absolute', right: 12, top: '50%',
-        zIndex: 200,
+        zIndex: Z_BASE_LAYERS.chromeToolbar,
         pointerEvents: show ? 'auto' : 'none',
       }}
     >

@@ -5,8 +5,7 @@ import {
   voiceIsReady, voiceSendAudio, voiceStopListening, voiceStartListening,
   voiceSpeak, voiceSpeakAck, voiceInterrupt, onVoicePartial, onVoiceFinal, onVoiceAudio, onVoiceState, onVoiceError, onVoiceStatus,
 } from '../lib/electron-api';
-import { vpsClient } from '../lib/vps-client';
-import { executeVoiceAction } from '../lib/voice-actions';
+import { listen, invoke } from '../lib/electron-api';
 import { parseVoiceCommand } from '../lib/voice-parser';
 import { executeAppCommand } from '../lib/agent-commands';
 import { isTranscriptValid, pcmFramesToWavBlob, transcribeWithGroq } from '../lib/groq-stt';
@@ -168,39 +167,8 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
         ? cmdResult.message
         : `Hmm, ${cmdResult.message.toLowerCase()}`;
 
-      // ── VPS Brain (enhancement — optional, non-blocking) ──────
-      // Fire-and-forget: if VPS is available it can enhance the response
-      // or execute advanced actions. If it fails, we already have feedback.
-      const corrected = transcript;
-      (async () => {
-        try {
-          const { agents } = useAppStore.getState();
-          const context = agents.length > 0
-            ? `Agents on canvas: ${agents.map(a => `${a.name} (${a.role})`).join(', ')}`
-            : '';
-          const brainResult = await vpsClient.processVoice(corrected, context);
-          if (brainResult.action) {
-            const actionResult = await executeVoiceAction(brainResult.action);
-            console.log('[Voice] VPS action executed:', actionResult);
-          }
-          speak(brainResult.response);
-        } catch {
-          // VPS unreachable — use local feedback
-          speak(feedback);
-        }
-      })();
-
-      // ── STT Correction (fire-and-forget, improves next time) ───
-      (async () => {
-        try {
-          const sttResult = await vpsClient.correctStt(transcript);
-          if (sttResult.corrected && sttResult.corrected !== transcript) {
-            console.log('[Voice] STT corrected:', transcript, '→', sttResult.corrected);
-          }
-        } catch {
-          // correction is optional
-        }
-      })();
+      // ── Local voice feedback ──────────────────────
+      speak(feedback);
     }));
 
     unsubs.push(onVoiceAudio(({ data }) => {
@@ -497,35 +465,13 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
     }
     setWaveform([]);
   }, []);
-  // ── Speak via VPS cloud TTS (with local fallback) ─────────
+  // ── Speak via local TTS ────────────────────────────
   const speak = useCallback(async (text: string) => {
     if (!text.trim()) { setVoiceState('idle'); return; }
     setVoiceState('speaking');
     startBargeMonitor();
-    try {
-      const { audio: b64, sample_rate } = await vpsClient.speak(text);
-      if (!b64) { setVoiceState('idle'); return; }
-      const binary = atob(b64);
-      const pcm = new Float32Array(binary.length / 4);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      const view = new DataView(bytes.buffer);
-      for (let i = 0; i < pcm.length; i++) pcm[i] = view.getFloat32(i * 4, true);
-
-      const audioCtx = new AudioContext();
-      const buffer = audioCtx.createBuffer(1, pcm.length, sample_rate || 24000);
-      buffer.getChannelData(0).set(pcm);
-      const source = audioCtx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(audioCtx.destination);
-      source.start(0);
-      source.onended = () => { audioCtx.close(); setVoiceState('idle'); };
-    } catch (err) {
-      console.warn('[Voice] Cloud TTS failed, trying local:', err);
-      // Fallback to local TTS
-      await voiceSpeak('response', text);
-      setVoiceState('idle');
-    }
+    // Local voice feedback only — VPS TTS decommissioned
+    setVoiceState('idle');
   }, [startBargeMonitor]);
 
   // ── Slot 1 ack: cached instant TTS ─────────────────────────

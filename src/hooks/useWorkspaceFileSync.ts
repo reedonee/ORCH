@@ -49,7 +49,7 @@ export function useWorkspaceFileSync() {
               startedRef.current = true;
               console.log(`[FileSync] Sync started for ${workspaceId}`);
             } else {
-              console.warn('[FileSync] Failed to start (IPC unavailable)');
+              console.debug('[FileSync] IPC not ready yet (non-fatal)');
             }
           })
           .catch((err: Error) => {

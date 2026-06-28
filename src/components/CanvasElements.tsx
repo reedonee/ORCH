@@ -13,12 +13,16 @@ export const CanvasTextNotes: React.FC = () => {
   const updateElement = useCanvasStore((s) => s.updateElement);
   const dragTarget = useCanvasStore((s) => s.dragTarget);
   const setDragTarget = useCanvasStore((s) => s.setDragTarget);
+  const selectedElementIds = useCanvasStore((s) => s.selectedElementIds);
+  const setSelectedElementIds = useCanvasStore((s) => s.setSelectedElementIds);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
   const [dragId, setDragId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [resizeTextId, setResizeTextId] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const dragRef = useRef({ elX: 0, elY: 0, mx: 0, my: 0 });
+  const resizeStartRef = useRef({ startY: 0, startSize: 0 });
 
   const textElements = elements.filter((el) => el.type === 'text');
   const isSelect = activeTool === 'select';
@@ -54,15 +58,34 @@ export const CanvasTextNotes: React.FC = () => {
     };
   }, [dragId, updateElement, setDragTarget]);
 
+  // Window-level resize for text font size
+  useEffect(() => {
+    if (!resizeTextId) return;
+    const onMove = (e: MouseEvent) => {
+      const deltaY = e.clientY - resizeStartRef.current.startY;
+      const newSize = Math.max(8, Math.min(72, resizeStartRef.current.startSize + Math.round(deltaY / 10)));
+      useCanvasStore.getState().updateElement(resizeTextId, { fontSize: newSize });
+    };
+    const onUp = () => setResizeTextId(null);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [resizeTextId]);
+
   const handleDragStart = useCallback((e: React.MouseEvent, el: { id: string; x?: number; y?: number }) => {
     if (!isSelect) return;
     // Don't start if another drag is in progress
     if (dragTarget && dragTarget !== 'text:') return;
     e.stopPropagation();
+    // Select the text element on click
+    setSelectedElementIds([el.id]);
     setDragTarget(`text:${el.id}`);
     dragRef.current = { elX: el.x ?? 0, elY: el.y ?? 0, mx: e.clientX, my: e.clientY };
     setDragId(el.id);
-  }, [isSelect, dragTarget, setDragTarget]);
+  }, [isSelect, dragTarget, setDragTarget, setSelectedElementIds]);
 
   return (
     <>
@@ -108,6 +131,8 @@ export const CanvasTextNotes: React.FC = () => {
         }
 
         const isHovered = hoveredId === el.id;
+        const isSelected = selectedElementIds.includes(el.id);
+        const showResize = isHovered && isSelect && !editingId && el.id !== resizeTextId;
 
         return (
           <div
@@ -138,11 +163,35 @@ export const CanvasTextNotes: React.FC = () => {
               zIndex: el.zIndex,
               padding: isHovered ? '1px 2px' : 0,
               borderRadius: isHovered ? 2 : 0,
-              outline: isHovered ? `1px solid ${el.strokeColor}30` : 'none',
+              outline: isSelected
+                ? `1.5px solid #F4A261`
+                : isHovered
+                  ? `1px solid ${el.strokeColor}30`
+                  : 'none',
               transition: 'text-shadow 120ms ease, outline 120ms ease, padding 120ms ease',
             }}
           >
             {el.text}
+            {/* Resize handle at bottom-right */}
+            {showResize && (
+              <div
+                onMouseDown={(e) => {
+                  e.stopPropagation();
+                  setResizeTextId(el.id);
+                  resizeStartRef.current = { startY: e.clientY, startSize: el.fontSize || 14 };
+                }}
+                style={{
+                  position: 'absolute',
+                  bottom: -6, right: -6,
+                  width: 12, height: 12,
+                  cursor: 'nwse-resize',
+                  background: '#F4A261',
+                  borderRadius: 2,
+                  border: '1px solid rgba(0,0,0,0.5)',
+                  zIndex: 10,
+                }}
+              />
+            )}
           </div>
         );
       })}

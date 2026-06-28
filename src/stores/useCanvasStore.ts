@@ -60,6 +60,10 @@ interface CanvasWorkspaceState {
   // Drag conflict prevention — only one drag target at a time
   dragTarget: string | null;
 
+  // ── Selection (lasso) ──────────────────────────────────────
+  selectedElementIds: string[];
+  selectionBox: { x1: number; y1: number; x2: number; y2: number } | null;
+
   // ── Tool actions ────────────────────────────────────────────
   setActiveTool: (tool: CanvasTool) => void;
   setActiveShapeType: (t: ShapeType) => void;
@@ -85,7 +89,12 @@ interface CanvasWorkspaceState {
   // ── Drag conflict prevention ────────────────────────────────
   setDragTarget: (target: string | null) => void;
 
-  // Internal history snapshot (called before mutations)
+  // ── Selection / lasso ──────────────────────────────────────
+  setSelectedElementIds: (ids: string[]) => void;
+  setSelectionBox: (box: { x1: number; y1: number; x2: number; y2: number } | null) => void;
+  clearSelection: () => void;
+
+  // ── Internal history snapshot (called before mutations) ──────
   pushHistory: () => void;
 
   // ── Workspace persistence helpers ───────────────────────────
@@ -125,6 +134,8 @@ const INITIAL_STATE = {
   undoStack: [] as CanvasElement[][],
   redoStack: [] as CanvasElement[][],
   dragTarget: null as string | null,
+  selectedElementIds: [] as string[],
+  selectionBox: null as { x1: number; y1: number; x2: number; y2: number } | null,
 };
 
 export const useCanvasStore = create<CanvasWorkspaceState>()(
@@ -230,6 +241,11 @@ export const useCanvasStore = create<CanvasWorkspaceState>()(
 
     // ── Drag conflict prevention ────────────────────────────
     setDragTarget: (target) => set({ dragTarget: target }),
+
+    // ── Selection / lasso ────────────────────────────────────
+    setSelectedElementIds: (ids) => set({ selectedElementIds: ids }),
+    setSelectionBox: (box) => set({ selectionBox: box }),
+    clearSelection: () => set({ selectedElementIds: [], selectionBox: null }),
 
     // ── Workspace persistence ────────────────────────────────
     toWorkspaceData: () => {

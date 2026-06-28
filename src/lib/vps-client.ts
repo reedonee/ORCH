@@ -133,6 +133,13 @@ export const vpsClient = {
       body: JSON.stringify({ cols, rows }),
     }),
 
+  /** Search workspace memories via Qdrant */
+  searchMemory: (query: string, agentId?: string, limit?: number): Promise<any> =>
+    request('/api/memory/search', {
+      method: 'POST',
+      body: JSON.stringify({ query, agent_id: agentId, limit: limit ?? 5 }),
+    }),
+
   /** List all VPS terminal sessions */
   listTerminals: (): Promise<Array<{ agent_id: string; attached: boolean }>> =>
     request('/api/sessions'),

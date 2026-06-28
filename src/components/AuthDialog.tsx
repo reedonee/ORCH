@@ -4,6 +4,8 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuthStore } from '../stores/useAuthStore';
+import { useThemeStore } from '../stores/useThemeStore';
+import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
 import { isSupabaseConfigured } from '../lib/supabase';
 import { GlassPanel } from './GlassPanel';
 import { X, Mail, Lock, CloudOff } from 'lucide-react';
@@ -22,6 +24,7 @@ const PIERCING_CRIMSON = '#E62E43';
 const GLASS_BG = 'rgba(18, 28, 24, 0.45)';
 const LUX_EASE = '0.4s cubic-bezier(0.16, 1, 0.3, 1)';
 const LOAD_COLORS = [AMBER_BURN, CORAL_CRIMSON, PIERCING_CRIMSON] as const;
+const EDU_FONT = "'Edu AU VIC WA NT Pre', cursive";
 
 interface AuthDialogProps {
   onClose?: () => void;
@@ -37,8 +40,8 @@ const inputBase: React.CSSProperties = {
   borderRadius: 10,
   color: ASH_WHITE,
   fontSize: 14,
-  fontWeight: 500,
-  fontFamily: 'inherit',
+  fontWeight: 700,
+  fontFamily: EDU_FONT,
   outline: 'none',
   transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
   boxSizing: 'border-box',
@@ -267,20 +270,40 @@ export const AuthDialog: React.FC<AuthDialogProps> = ({ onClose = () => {}, mode
               from { opacity: 0; transform: translateY(12px); }
               to   { opacity: 1; transform: translateY(0); }
             }
+            /* cursive input placeholders — bold, crisp, glass-morphic */
+            .auth-input::placeholder {
+              font-family: 'Edu AU VIC WA NT Pre', cursive;
+              font-weight: 700;
+              color: rgba(255,255,255,0.12);
+              opacity: 1;
+            }
           `}</style>
 
           {/* ── Brand header — fades out during loading ─────── */}
           <div style={{
-            display: 'flex', alignItems: 'center', gap: 10, marginBottom: isLoading ? 0 : 24,
+            display: 'flex', flexDirection: 'column', alignItems: 'center',
+            gap: 0, marginBottom: isLoading ? 4 : 26,
             opacity: isLoading ? 0 : 1,
             transition: `opacity 0.3s ease, margin-bottom 0.4s ${LUX_EASE}`,
             pointerEvents: 'none',
           }}>
-            <div style={{ width: 24, height: 24, color: AMBER_BURN }}>
-              <AppLogo style={{ width: '100%', height: '100%' }} />
-            </div>
-            <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '0.02em', color: ASH_WHITE }}>
+            <span style={{
+              fontFamily: EDU_FONT,
+              fontSize: '5rem',
+              fontWeight: 400,
+              lineHeight: 1,
+              color: ASH_WHITE,
+              letterSpacing: '0.04em',
+            }}>
               ORCH
+            </span>
+            <span style={{
+              fontSize: 10, fontWeight: 700,
+              letterSpacing: '0.3em', textTransform: 'uppercase',
+              color: 'rgba(255,255,255,0.15)',
+              marginTop: 2,
+            }}>
+              workspace
             </span>
           </div>
 
@@ -325,7 +348,7 @@ export const AuthDialog: React.FC<AuthDialogProps> = ({ onClose = () => {}, mode
                     pointerEvents: 'none', transition: `color 0.2s cubic-bezier(0.16, 1, 0.3, 1)`,
                     zIndex: 1,
                   }} />
-                  <input type="email" placeholder="you@example.com"
+                  <input type="email" placeholder="you@example.com" className="auth-input"
                     value={email} onChange={(e) => setEmail(e.target.value)}
                     onFocus={() => setFocusedField('email')} onBlur={() => setFocusedField(null)}
                     required
@@ -346,7 +369,7 @@ export const AuthDialog: React.FC<AuthDialogProps> = ({ onClose = () => {}, mode
                     pointerEvents: 'none', transition: `color 0.2s cubic-bezier(0.16, 1, 0.3, 1)`,
                     zIndex: 1,
                   }} />
-                  <input type="password" placeholder="············"
+                  <input type="password" placeholder="············" className="auth-input"
                     value={password} onChange={(e) => setPassword(e.target.value)}
                     onFocus={() => setFocusedField('password')} onBlur={() => setFocusedField(null)}
                     required minLength={6}
@@ -475,24 +498,30 @@ export const AuthDialog: React.FC<AuthDialogProps> = ({ onClose = () => {}, mode
                 {loginState === 'loading' ? (
                   <span style={{
                     fontSize: 11, fontWeight: 500,
-                    fontFamily: "'SF Mono', 'SF Mono', 'Geist Mono', monospace",
-                    letterSpacing: '0.15em', textTransform: 'uppercase',
+                    fontFamily: EDU_FONT,
+                    letterSpacing: '0.04em',
                     color: 'rgba(255,255,255,0.15)',
-                  }}>Authorizing</span>
+                  }}>
+                    <span style={{ opacity: 0, animation: 'fadeIn 1.2s ease 0.8s forwards' }}>Authorizing</span>
+                  </span>
                 ) : loginState === 'success' ? (
                   <span style={{
                     fontSize: 11, fontWeight: 500,
-                    fontFamily: "'SF Mono', 'Geist Mono', 'SF Mono', monospace",
-                    letterSpacing: '0.2em', textTransform: 'uppercase',
+                    fontFamily: EDU_FONT,
+                    letterSpacing: '0.04em',
                     color: ASH_WHITE,
-                  }}>Welcome Home</span>
+                  }}>
+                    <span style={{ opacity: 0, animation: 'fadeIn 0.8s ease 0.4s forwards' }}>Welcome Home</span>
+                  </span>
                 ) : (
                   <span style={{
                     fontSize: 11, fontWeight: 600,
-                    fontFamily: "'SF Mono', 'Geist Mono', 'SF Mono', monospace",
-                    letterSpacing: '0.18em', textTransform: 'uppercase',
+                    fontFamily: EDU_FONT,
+                    letterSpacing: '0.04em',
                     color: PIERCING_CRIMSON,
-                  }}>Invalid Credentials!</span>
+                  }}>
+                    <span style={{ opacity: 0, animation: 'fadeIn 0.8s ease 0.2s forwards' }}>Invalid Credentials!</span>
+                  </span>
                 )}
               </div>
             </div>
@@ -507,7 +536,7 @@ export const AuthDialog: React.FC<AuthDialogProps> = ({ onClose = () => {}, mode
 const AuthWrapper: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <div
     style={{
-      position: 'fixed', inset: 0, zIndex: 1000,
+      position: 'fixed', inset: 0, zIndex: Z_BASE_LAYERS.modal,
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       background: `radial-gradient(ellipse at 50% 50%, ${OBSIDIAN_VOID} 0%, ${DEEP_FOREST} 100%)`,
       overflow: 'hidden',
