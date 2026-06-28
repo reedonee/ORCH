@@ -2,6 +2,7 @@
 //
 // Every theme has a `name`, `label`, and `video` (relative to /public/).
 // The App component switches the <video> source when the theme changes.
+// Paths are relative to dist/ (Vite copies public/ content into dist/ on build).
 
 export interface ThemeTokens {
   name: string;
@@ -75,7 +76,7 @@ const shared = {
 export const edenTheme: ThemeTokens = {
   name: 'eden',
   label: 'Overgrown Transit',
-  video: '/last-train-to-eden.mp4',
+  video: 'last-train-to-eden.mp4',
   colors: {
     bg: '#0E1A14',
     bgAlt: '#122018',
@@ -129,7 +130,7 @@ export const edenTheme: ThemeTokens = {
 export const twilightTheme: ThemeTokens = {
   name: 'twilight',
   label: 'Twilight Horizon',
-  video: '/Twilight Horizon.mp4',
+  video: 'Twilight Horizon.mp4',
   colors: {
     bg: '#1C1326',            // Deep Pier Espresso — canvas bg
     bgAlt: '#2A1D38',         // slightly lifted for sidebar
@@ -180,7 +181,7 @@ export const twilightTheme: ThemeTokens = {
 export const crimsonTheme: ThemeTokens = {
   name: 'crimson',
   label: 'Crimson Age',
-  video: '/crimson.jpg',
+  video: 'crimson.jpg',
   colors: {
     bg: '#050304',
     bgAlt: '#12080a',

@@ -949,6 +949,24 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({ onClose }) => {
             );
           })}
           <div style={{ flex: 1 }} />
+          {/* ── App version badge ──────────────────────────── */}
+          <div style={{
+            padding: '12px 12px 4px',
+            borderTop: '1px solid var(--border-dim)',
+          }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              fontSize: 9, fontWeight: 600, letterSpacing: 0.8,
+              color: 'var(--text-muted)', opacity: 0.5,
+              fontFamily: 'var(--font-mono)',
+            }}>
+              <span style={{
+                width: 5, height: 5, borderRadius: '50%',
+                background: 'var(--accent)', opacity: 0.4,
+              }} />
+              v{__APP_VERSION__}
+            </div>
+          </div>
         </div>
 
         {/* main content */}

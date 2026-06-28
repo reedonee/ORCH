@@ -1,7 +1,7 @@
 {
   "name": "orch-electron",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -53,6 +53,7 @@
   "build": {
     "appId": "com.orch.electron",
     "productName": "ORCH",
+    "copyright": "Copyright © 2026 redCRAFT",
     "directories": {
       "output": "release"
     },
@@ -60,10 +61,35 @@
       "dist/**/*",
       "dist-electron/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "build/",
+        "to": "build/",
+        "filter": ["**/*", "!installer.nsh"]
+      }
+    ],
     "publish": {
       "provider": "github",
       "owner": "reedonee",
       "repo": "ORCH"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ORCH",
+      "installerIcon": "ORCH LOGO1.ico",
+      "uninstallerIcon": "ORCH LOGO1.ico",
+      "installerHeaderIcon": "ORCH LOGO1.ico",
+      "installerHeader": "build/installer-header.bmp",
+      "license": "LICENSE.txt",
+      "include": "build/installer.nsh",
+      "runAfterFinish": true,
+      "perMachine": false,
+      "language": "1033",
+      "unicode": true,
+      "warnDirNotEmpty": true
     },
     "win": {
       "target": "nsis",
