@@ -57,12 +57,13 @@ const labelStyle: React.CSSProperties = {
 };
 
 export const AuthDialog: React.FC<AuthDialogProps> = ({ onClose = () => {}, mode = 'dialog' }) => {
-  const { status, user, error: storeError, login, logout, clearError } = useAuthStore();
+  const { status, user, error: storeError, login, signUp, logout, clearError } = useAuthStore();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [focusedField, setFocusedField] = useState<'email' | 'password' | null>(null);
   const [loginState, setLoginState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [signingUp, setSigningUp] = useState(false);
   const [loadColor, setLoadColor] = useState(AMBER_BURN);
   const [spinDuration, setSpinDuration] = useState(0.8);
   const [errorMsg, setErrorMsg] = useState('');
@@ -122,18 +123,20 @@ export const AuthDialog: React.FC<AuthDialogProps> = ({ onClose = () => {}, mode
     setLoginState('loading');
     setErrorMsg('');
     try {
-      const result = await login(email, password);
+      const result = signingUp
+        ? await signUp(email, password)
+        : await login(email, password);
       if (result.success) {
         setLoginState('success');
         setTimeout(() => {
           if (!isGate) onClose();
         }, 2000);
       } else {
-        setErrorMsg(result.error || 'Invalid credentials');
+        setErrorMsg(result.error || (signingUp ? 'Sign up failed' : 'Invalid credentials'));
         setLoginState('error');
       }
     } catch {
-      setErrorMsg('Invalid credentials');
+      setErrorMsg(signingUp ? 'Sign up failed' : 'Invalid credentials');
       setLoginState('error');
     }
   };
@@ -320,10 +323,12 @@ export const AuthDialog: React.FC<AuthDialogProps> = ({ onClose = () => {}, mode
             {/* Title */}
             <div style={{ marginBottom: 24 }}>
               <div style={{ fontSize: 20, fontWeight: 700, color: ASH_WHITE, letterSpacing: '-0.01em' }}>
-                Sign in
+                {signingUp ? 'Create account' : 'Sign in'}
               </div>
               <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.35)', marginTop: 4, fontWeight: 450 }}>
-                Enter your credentials to continue
+                {signingUp
+                  ? 'Enter your email to get started'
+                  : 'Enter your credentials to continue'}
               </div>
             </div>
 
@@ -408,7 +413,7 @@ export const AuthDialog: React.FC<AuthDialogProps> = ({ onClose = () => {}, mode
                 onMouseDown={(e) => { if (!submitting) e.currentTarget.style.transform = 'scale(0.98)'; }}
                 onMouseUp={(e) => { if (!submitting) e.currentTarget.style.transform = 'scale(1.02)'; }}
               >
-                {submitting ? 'Signing in…' : 'Sign in'}
+                {submitting ? (signingUp ? 'Creating account…' : 'Signing in…') : (signingUp ? 'Create account' : 'Sign in')}
               </button>
             </form>
 
@@ -443,6 +448,38 @@ export const AuthDialog: React.FC<AuthDialogProps> = ({ onClose = () => {}, mode
               <GoogleIcon size={16} />
               Continue with Google
             </button>
+
+            {/* ── Toggle sign in / sign up ───────────────── */}
+            <div style={{
+              textAlign: 'center', marginTop: 8, fontSize: 12,
+              color: 'rgba(255,255,255,0.25)',
+            }}>
+              {signingUp ? (
+                <span>
+                  Already have an account?{' '}
+                  <button onClick={() => setSigningUp(false)}
+                    style={{
+                      background: 'none', border: 'none', color: AMBER_BURN,
+                      cursor: 'pointer', fontFamily: 'inherit', fontSize: 12,
+                      fontWeight: 700, padding: 0, textDecoration: 'none',
+                    }}>
+                    Sign in
+                  </button>
+                </span>
+              ) : (
+                <span>
+                  No account?{' '}
+                  <button onClick={() => setSigningUp(true)}
+                    style={{
+                      background: 'none', border: 'none', color: AMBER_BURN,
+                      cursor: 'pointer', fontFamily: 'inherit', fontSize: 12,
+                      fontWeight: 700, padding: 0, textDecoration: 'none',
+                    }}>
+                    Create one
+                  </button>
+                </span>
+              )}
+            </div>
 
             {!isGate && (
               <button onClick={onClose} style={{

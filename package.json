@@ -83,13 +83,9 @@
       "uninstallerIcon": "ORCH LOGO1.ico",
       "installerHeaderIcon": "ORCH LOGO1.ico",
       "installerHeader": "build/installer-header.bmp",
-      "license": "LICENSE.txt",
       "include": "build/installer.nsh",
-      "runAfterFinish": true,
       "perMachine": false,
-      "language": "1033",
-      "unicode": true,
-      "warnDirNotEmpty": true
+      "unicode": true
     },
     "win": {
       "target": "nsis",
