@@ -274,6 +274,7 @@ export const ChatBar: React.FC = () => {
 
   return (
     <div
+      data-chrome="chat-bar"
       style={{
         position: 'fixed', bottom: 28, left: '50%', transform: 'translateX(-50%)',
         width: 540, maxWidth: 'calc(100vw - 48px)', height: 44,

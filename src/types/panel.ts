@@ -51,6 +51,9 @@ export interface PanelNode {
   focusable: boolean;
   /** Pinned — engine will never move or resize this panel */
   locked: boolean;
+  /** Set to true when the user manually drags or resizes this panel.
+   *  Cleared by autoArrange() so the engine is free to reposition. */
+  wasManuallyMoved?: boolean;
 
   // ── Z-order (runtime, computed by z-stack manager) ──
   /** The panel's resting layer (e.g. agent=10, browser=500) */

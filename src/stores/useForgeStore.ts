@@ -298,11 +298,18 @@ export const useForgeStore = create<ForgeState>()((set, get) => ({
       }));
       const startMs = Date.now();
       await new Promise((r) => setTimeout(r, 1000 + Math.random() * 600));
-      const passed = Math.random() > 0.2;
+      // Deterministic verdict derived from the consensus artifacts rather than
+      // a coin flip: a task passes when it has a concrete proposal AND a
+      // peer-review recommendation. Tasks lacking either are the genuine
+      // failure surface, so the pipeline outcome is coherent and reproducible.
+      const task = get().tasks.find((t) => t.id === run.taskId);
+      const hasProposal = !!task?.proposal && !task.proposal.startsWith('[Fallback');
+      const recommended = !!task?.evaluation?.match(/APPROVED|Recommendation:\s*APPROVE/i);
+      const passed = hasProposal && recommended;
       set((s) => ({
         testRuns: s.testRuns.map((tr) =>
           tr.taskId === run.taskId
-            ? { ...tr, status: (passed ? 'passed' : 'failed') as any, durationMs: Date.now() - startMs, output: passed ? 'All checks passed ✓' : 'FAIL: expected x to equal y' }
+            ? { ...tr, status: (passed ? 'passed' : 'failed') as any, durationMs: Date.now() - startMs, output: passed ? 'All checks passed ✓' : 'FAIL: missing implementation or unapproved review' }
             : tr
         ),
         metrics: { ...s.metrics, testsPassed: s.metrics.testsPassed + (passed ? 1 : 0), totalTokensProcessed: s.metrics.totalTokensProcessed + 440 },

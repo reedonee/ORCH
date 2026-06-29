@@ -175,6 +175,7 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
 
   return (
     <div
+      data-chrome="pill-bar"
       style={{
         position: 'fixed',
         top: 26,

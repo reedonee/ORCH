@@ -299,7 +299,12 @@ export const usePanelRegistry = create<PanelRegistryState>()(
       });
     },
 
-    endDrag: () => set({ dragPanelId: null }),
+    endDrag: () => {
+      const id = get().dragPanelId;
+      set({ dragPanelId: null });
+      // Mark manually moved so smart reflow can distinguish user placement
+      if (id) get().updatePanel(id, { locked: true, wasManuallyMoved: true });
+    },
 
     beginResize: (id) => set({ resizePanelId: id }),
     endResize: () => set({ resizePanelId: null }),
@@ -432,10 +437,7 @@ export const usePanelRegistry = create<PanelRegistryState>()(
         });
       }
 
-      useAppStore.getState().setViewport(snapshot.viewportPan, snapshot.viewportZoom, {
-        w: window.innerWidth,
-        h: window.innerHeight,
-      });
+      useAppStore.getState().requestViewportFrame(snapshot.viewportPan, snapshot.viewportZoom);
     },
   }),
 );

@@ -35,7 +35,7 @@ import {
   computeSafeRegion,
   CHROME,
 } from '../lib/layout-engine';
-import type { PanelItem, SafeRegion } from '../lib/layout-engine';
+import type { PanelItem, SafeRegion, ChromeInsets } from '../lib/layout-engine';
 
 // ── Layout Engine Specification ─────────────────────────────────
 export const LAYOUT_ENGINE_SPEC = {
@@ -267,6 +267,45 @@ function subscribeAgentLifecycle() {
 let autoArrangeTimer: ReturnType<typeof setTimeout> | null = null;
 let reflowTimer: ReturnType<typeof setTimeout> | null = null;
 
+// ── Layout generation counter ─────────────────────────────────
+// Prevents stale commits when multiple lifecycle triggers race.
+// Each arrange call captures its generation before resolveLayout;
+// if another arrange incremented the counter before it commits,
+// the stale result is discarded.
+let layoutGeneration = 0;
+
+function withGeneration(fn: () => void) {
+  const gen = ++layoutGeneration;
+  return () => {
+    if (gen !== layoutGeneration) return; // stale — discard
+    fn();
+  };
+}
+
+/** Measure actual chrome positions from the DOM. Returns ChromeInsets
+ *  with the real bottom-edge of the pill bar and top-edge of the chat bar,
+ *  or sensible defaults when the elements aren't found (e.g. pre-mount).
+ *  Padding reduced to 8px for tighter safe region fitting. */
+function measureChromeInsets(): ChromeInsets | undefined {
+  if (typeof document === 'undefined') return undefined;
+  const pillBar = document.querySelector('[data-chrome="pill-bar"]');
+  const chatBar = document.querySelector('[data-chrome="chat-bar"]');
+  const vh = window.innerHeight;
+  const pillBottom = pillBar
+    ? pillBar.getBoundingClientRect().bottom
+    : 62; // fallback: 26 + 36
+  const chatTop = chatBar
+    ? chatBar.getBoundingClientRect().top
+    : vh - 72; // fallback: vh - 28 - 44
+  if (!pillBar && !chatBar) return undefined;
+  return {
+    topBarBottom:  pillBottom + 8,
+    bottomBarTop:  chatTop - 8,
+    leftReserved:  56,
+    rightReserved: 8,
+  };
+}
+
 function debounceAutoArrange() {
   if (autoArrangeTimer) clearTimeout(autoArrangeTimer);
   autoArrangeTimer = setTimeout(() => {
@@ -292,19 +331,26 @@ function autoArrangeRespectingLocks() {
   const browser = useBrowserStore.getState();
   const music = useMusicPlayerStore.getState();
   const grid = LAYOUT_ENGINE_SPEC.arrangements.gridSnap;
+  const gen = ++layoutGeneration;
   const result = resolveLayout({
     panels,
     viewport: { w: viewportWinSize.w, h: viewportWinSize.h, pan: viewportPan, zoom: viewportZoom },
     browserVisible: browser.visible,
     musicVisible: music.visible,
     grid,
+    chromeInsets: measureChromeInsets(),
   });
+  if (layoutGeneration !== gen) return; // stale — discard
   commitLayoutResult(result.positions, result.sizes, result.pan, result.zoom, null);
 }
 
 // ── Viewport Frame Commit ──────────────────────────────────────
+// The engine's computed framing must reach the canvas. The canvas only owns
+// pan/zoom locally and pushes to the store (canvas → store), so writing the
+// store silently does nothing. Route the engine's result through the
+// reverse channel (requestViewportFrame) which the canvas subscribes to.
 function commitViewportFrame(pan: { x: number; y: number }, zoom: number, w: number, h: number) {
-  useAppStore.getState().setViewport(pan, zoom, { w, h });
+  useAppStore.getState().requestViewportFrame(pan, zoom);
 }
 
 /** Clear the user-pinned (locked) flag on every panel. Called by explicit
@@ -317,7 +363,7 @@ function clearAllLocks() {
   const updates: Array<{ id: string; patch: Partial<import('../types/panel').PanelNode> }> = [];
   for (let i = 0; i < keys.length; i++) {
     const p = registry.panels[keys[i]];
-    if (p.locked) updates.push({ id: p.id, patch: { locked: false } });
+    if (p.locked || p.wasManuallyMoved) updates.push({ id: p.id, patch: { locked: false, wasManuallyMoved: false } });
   }
   if (updates.length > 0) registry.batchUpdatePanels(updates);
 }
@@ -609,14 +655,16 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => {
     const music = useMusicPlayerStore.getState();
     const grid = LAYOUT_ENGINE_SPEC.arrangements.gridSnap;
 
+    const gen = ++layoutGeneration;
     const result = resolveLayout({
       panels,
       viewport: { w: viewportWinSize.w, h: viewportWinSize.h, pan: viewportPan, zoom: viewportZoom },
       browserVisible: browser.visible,
       musicVisible: music.visible,
       grid,
+      chromeInsets: measureChromeInsets(),
     });
-
+    if (layoutGeneration !== gen) return; // stale — discard
     commitLayoutResult(result.positions, result.sizes, result.pan, result.zoom, null);
   },
 
@@ -630,14 +678,16 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => {
     const music = useMusicPlayerStore.getState();
     const grid = LAYOUT_ENGINE_SPEC.arrangements.gridSnap;
 
+    const gen = ++layoutGeneration;
     const result = resolveLayout({
       panels,
       viewport: { w: viewportWinSize.w, h: viewportWinSize.h, pan: viewportPan, zoom: viewportZoom },
       browserVisible: browser.visible,
       musicVisible: music.visible,
       grid,
+      chromeInsets: measureChromeInsets(),
     });
-
+    if (layoutGeneration !== gen) return; // stale — discard
     commitLayoutResult(result.positions, result.sizes, result.pan, result.zoom, 'tidy');
   },
 
@@ -659,14 +709,16 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => {
     const music = useMusicPlayerStore.getState();
     const grid = LAYOUT_ENGINE_SPEC.arrangements.gridSnap;
 
+    const gen = ++layoutGeneration;
     const result = resolveLayout({
       panels,
       viewport: { w: viewportWinSize.w, h: viewportWinSize.h, pan: viewportPan, zoom: viewportZoom },
       browserVisible: true,
       musicVisible: music.visible,
       grid,
+      chromeInsets: measureChromeInsets(),
     });
-
+    if (layoutGeneration !== gen) return; // stale — discard
     commitLayoutResult(result.positions, result.sizes, result.pan, result.zoom, 'stage');
   },
 
@@ -707,7 +759,7 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => {
     const cellW = defW + pad;
     const cellH = defH + pad;
 
-    // Collect obstacles from the registry (all visible panels)
+    // Collect obstacles from ALL visible panels (including mid-drag, locked, etc.)
     const regPanels = registry.panels;
     const existing: Array<{ x: number; y: number; w: number; h: number }> = [];
     for (const id of Object.keys(regPanels)) {
@@ -725,30 +777,10 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => {
     const cx = vpLeft + (viewportWinSize.w / viewportZoom) / 2;
     const cy = vpTop + (viewportWinSize.h / viewportZoom) / 2;
 
-    const baseCol = Math.floor(cx / cellW);
-    const baseRow = Math.floor(cy / cellH);
-
-    const overlapsAny = (x: number, y: number): boolean =>
-      existing.some(
-        (e) => !(x + cellW + pad <= e.x || x >= e.x + e.w + pad || y + cellH + pad <= e.y || y >= e.y + e.h + pad),
-      );
-
-    // Spiral outward from viewport center
-    for (let radius = 0; radius <= 20; radius++) {
-      for (let row = baseRow - radius; row <= baseRow + radius; row++) {
-        for (let col = baseCol - radius; col <= baseCol + radius; col++) {
-          if (radius > 0 && Math.abs(col - baseCol) < radius && Math.abs(row - baseRow) < radius) continue;
-          const x = col * cellW;
-          const y = row * cellH;
-          if (!overlapsAny(x, y)) {
-            return { x: Math.round(x / grid) * grid, y: Math.round(y / grid) * grid };
-          }
-        }
-      }
-    }
-
-    // Fallback: center of viewport
-    return { x: Math.round(cx / grid) * grid, y: Math.round(cy / grid) * grid };
+    // Delegate to the engine's single source of truth
+    const region = computeSafeRegion(viewportWinSize.w, viewportWinSize.h, grid);
+    const result = findSpawnSlot(existing, region, grid, { w: cellW, h: cellH }, { x: cx, y: cy });
+    return { x: result.x, y: result.y };
   },
 
   commitLayout: (positions, sizes, pan, zoom, transitionStr, layoutMode) => {

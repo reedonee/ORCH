@@ -52,6 +52,8 @@ export const InfiniteCanvas: React.FC = () => {
   const selectedAgentId = useAppStore((s) => s.selectedAgentId);
   const focusTarget = useAppStore((s) => s.focusTarget);
   const clearFocusTarget = useAppStore((s) => s.clearFocusTarget);
+  const viewportFrame = useAppStore((s) => s.viewportFrame);
+  const clearViewportFrame = useAppStore((s) => s.clearViewportFrame);
   const delegationLinks = useAppStore((s) => s.delegationLinks);
   const activeTool = useCanvasStore((s) => s.activeTool);
   const addElement = useCanvasStore((s) => s.addElement);
@@ -167,6 +169,18 @@ export const InfiniteCanvas: React.FC = () => {
     setZoom(focusTarget.zoom);
     clearFocusTarget();
   }, [focusTarget, clearFocusTarget]);
+
+  // ── react to engine-driven framing (auto-arrange / tidy / stage / preset)
+  // The layout engine computes pan+zoom and pushes it here via the store.
+  // Without this, the engine's framing wrote to the store silently and the
+  // canvas never moved — so arranges positioned nodes off-screen. seq keys the
+  // dependency so repeated identical framings still fire.
+  useEffect(() => {
+    if (!viewportFrame) return;
+    setPan({ x: viewportFrame.x, y: viewportFrame.y });
+    setZoom(viewportFrame.zoom);
+    clearViewportFrame();
+  }, [viewportFrame, clearViewportFrame]);
 
   // ── window resize ──────────────────────────────────────────────────────────
   useEffect(() => {

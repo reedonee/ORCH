@@ -58,6 +58,12 @@ interface AppState {
   // Focus target — canvas watches this and pans to it, then nulls it
   focusTarget: { x: number; y: number; zoom: number } | null;
 
+  // Programmatic viewport request — the layout engine pushes its computed
+  // framing here; the canvas subscribes and applies it (one-shot, then nulls).
+  // This is the reverse channel back to the canvas, mirroring focusTarget but
+  // for engine-driven framing (auto-arrange, tidy, stage, etc.).
+  viewportFrame: { x: number; y: number; zoom: number; seq: number } | null;
+
   addAgent: (agent: Agent) => Promise<void>;
   removeAgent: (id: string) => Promise<void>;
   updateAgentPosition: (id: string, x: number, y: number) => void;
@@ -72,6 +78,9 @@ interface AppState {
   toggleCoordinator: () => Promise<void>;
   setSelectedAgent: (id: string | null) => void;
   setViewport: (pan: { x: number; y: number }, zoom: number, winSize: { w: number; h: number }) => void;
+  /** Engine-driven framing request (consumed once by the canvas) */
+  requestViewportFrame: (pan: { x: number; y: number }, zoom: number) => void;
+  clearViewportFrame: () => void;
   focusOnAgent: (agent: { x: number; y: number; width?: number; height?: number; id: string }) => void;
   clearFocusTarget: () => void;
   // Delegation links
@@ -104,6 +113,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   viewportZoom: 1,
   viewportWinSize: { w: window.innerWidth, h: window.innerHeight },
   focusTarget: null,
+  viewportFrame: null,
 
   addAgent: async (agent) => {
     await invoke('register_agent', { agent: {
@@ -239,6 +249,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSelectedAgent: (id) => set({ selectedAgentId: id }),
 
   setViewport: (pan, zoom, winSize) => set({ viewportPan: pan, viewportZoom: zoom, viewportWinSize: winSize }),
+
+  // Monotonic seq guarantees the canvas effect fires even when the engine
+  // requests the same framing twice in a row (e.g. two consecutive arranges).
+  requestViewportFrame: (pan, zoom) =>
+    set((state) => ({
+      viewportFrame: { x: pan.x, y: pan.y, zoom, seq: (state.viewportFrame?.seq ?? 0) + 1 },
+      viewportPan: pan,
+      viewportZoom: zoom,
+    })),
+
+  clearViewportFrame: () => set({ viewportFrame: null }),
 
   focusOnAgent: (agent) => {
     const { viewportWinSize } = get();
