@@ -59,6 +59,19 @@ Requires Python 3.11+ with `pip install faster-whisper kokoro-onnx silero-vad` f
 └────────────────────────────────────────────────┘
 ```
 
+
+<img width="1366" height="736" alt="image" src="https://github.com/user-attachments/assets/c68c0f16-9b60-4400-b2d0-5ce76be71b8a" />
+
+
+
+<img width="1366" height="736" alt="image" src="https://github.com/user-attachments/assets/d1e018a7-1c3d-4f73-9d6f-3951cb10e238" />
+
+
+<img width="1366" height="737" alt="image" src="https://github.com/user-attachments/assets/0dcf35fa-ed45-484e-b269-136a7cf25ea7" />
+
+
+
+
 ## ✦ Voice pipeline
 
 ```
