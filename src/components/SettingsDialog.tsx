@@ -9,10 +9,11 @@ import { useAuthStore } from '../stores/useAuthStore';
 import { useMusicPlayerStore } from '../stores/useMusicPlayerStore';
 import { X, Palette, Layout, Keyboard, Mic, Bot, Key, Plug, User, Grid3X3, Theater } from 'lucide-react';
 import { VisualThemeEngine } from './VisualThemeEngine';
-import { getMcpUrl, installProvider, onInstallProgress } from '../lib/electron-api';
+import { getMcpUrl, installProvider, onInstallProgress, voiceModelStatus } from '../lib/electron-api';
 import { PROVIDER_ICONS } from './icons/ProviderIcon';
 import type { ProviderStatus } from '../types/provider';
 import type { AgentProvider } from '../types/settings';
+import type { VoiceModelStatus } from '../lib/electron-api';
 
 interface SettingsDialogProps {
   onClose: () => void;
@@ -639,6 +640,7 @@ const McpSection: React.FC = () => {
 const AudioSection: React.FC = () => {
   const { audioInputDeviceId, setAudioInputDevice, groqApiKey, setGroqApiKey, enableGroqOnSTTFailure, setGroqOnSTTFailure, instantStart, setInstantStart } = useSettingsStore();
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [modelStatus, setModelStatus] = useState<VoiceModelStatus | null>(null);
   const groqKey = groqApiKey || '';
   const enableGroq = enableGroqOnSTTFailure || false;
 
@@ -647,6 +649,26 @@ const AudioSection: React.FC = () => {
       setDevices(all.filter((d) => d.kind === 'audioinput'));
     }).catch(() => {});
   }, []);
+
+  // Poll voice model status every 3s
+  useEffect(() => {
+    const poll = () => {
+      voiceModelStatus().then(setModelStatus).catch(() => {});
+    };
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => clearInterval(id);
+  }, []);
+
+  const ModelRow: React.FC<{ name: string; ok: boolean; detail?: string }> = ({ name, ok, detail }) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0' }}>
+      <span className={`status-dot ${ok ? 'active' : 'idle'}`} />
+      <span style={{ fontSize: 12, fontWeight: 600 }}>{name}</span>
+      <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+        {ok ? 'Ready' : detail || 'Not found'}
+      </span>
+    </div>
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -693,6 +715,28 @@ const AudioSection: React.FC = () => {
               boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
             }} />
           </div>
+        </div>
+      </div>
+
+      {/* Voice Models status */}
+      <div style={glassCard}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ color: modelStatus?.serverRunning ? 'var(--accent)' : 'var(--text-muted)' }}>
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+            <line x1="12" y1="19" x2="12" y2="23" />
+            <line x1="8" y1="23" x2="16" y2="23" />
+          </svg>
+          Voice Models (V3 · TDT)
+          <span style={{ fontSize: 10, marginLeft: 'auto', color: 'var(--text-muted)', fontWeight: 400 }}>
+            {modelStatus?.serverRunning ? 'Server running' : 'Server stopped'}
+            <span className={`status-dot ${modelStatus?.serverRunning ? 'active' : 'idle'}`} style={{ marginLeft: 6 }} />
+          </span>
+        </div>
+        <div style={{ borderTop: '1px solid var(--border-dim)', paddingTop: 4 }}>
+          <ModelRow name="Parakeet TDT V3 (STT)" ok={modelStatus?.models.parakeet.present ?? false} detail="Downloads on first launch" />
+          <ModelRow name="Kokoro (TTS · ONNX)" ok={modelStatus?.models.kokoro.present ?? false} detail="Downloads on first voice capture" />
+          <ModelRow name="Whisper (STT · fallback)" ok={modelStatus?.models.whisper.present ?? false} detail="Cached by faster-whisper" />
         </div>
       </div>
 

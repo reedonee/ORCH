@@ -24,11 +24,9 @@ declare global {
     getRecentWorkspaces: () => Promise<{ path: string; name: string; lastOpened: number }[]>;
     saveRecentWorkspaces: (workspaces: { path: string; name: string; lastOpened: number }[]) => Promise<{ success: boolean }>;
     workspaceExists: (workspacePath: string) => Promise<boolean>;
-    // ── File Sync ───────────────────────────────────────────
-    fileSyncStart: (workspaceId: string, localPath: string, vpsUrl: string) => Promise<{ success: boolean }>;
-    fileSyncStop: () => Promise<{ success: boolean }>;
-    fileSyncGetState: () => Promise<SyncState>;
-    onFileSyncStateChanged: (callback: (state: SyncState) => void) => () => void;
+    // ── File Sync — REMOVED (VPS decommissioned, everything local)
+    // fileSyncStart, fileSyncStop, fileSyncGetState, onFileSyncStateChanged
+    // were removed when the VPS was taken down.
     // ── Browser ────────────────────────────────────────────
     browserNavigate: (id: string, url: string) => Promise<{ success: boolean }>;
     browserGoBack: (id: string) => Promise<{ success: boolean }>;
@@ -143,8 +141,25 @@ export function voiceSpeakAck(id?: string, phrase?: string): Promise<void> {
 }
 
 export function voiceInterrupt(): Promise<void> {
-  if (!api) return Promise.resolve();
+  if (!api?.invoke) return Promise.resolve();
   return api.invoke('voice_interrupt') as Promise<void>;
+}
+
+export interface VoiceModelStatus {
+  serverRunning: boolean;
+  models: {
+    parakeet: { present: boolean; path: string };
+    kokoro: { present: boolean; path: string };
+    whisper: { present: boolean; path: string };
+  };
+}
+
+export function voiceModelStatus(): Promise<VoiceModelStatus> {
+  if (!api?.invoke) return Promise.resolve({
+    serverRunning: false,
+    models: { parakeet: { present: false, path: '' }, kokoro: { present: false, path: '' }, whisper: { present: false, path: '' } },
+  });
+  return api.invoke('voice_model_status') as Promise<VoiceModelStatus>;
 }
 
 // ── Agent Install ──────────────────────────────────────────────────
@@ -211,24 +226,22 @@ export interface SyncState {
   pendingChanges: number;
 }
 
-export function fileSyncStart(workspaceId: string, localPath: string, vpsUrl: string): Promise<{ success: boolean }> {
-  if (!api?.fileSyncStart) return Promise.resolve({ success: false });
-  return api.fileSyncStart(workspaceId, localPath, vpsUrl) as Promise<{ success: boolean }>;
+// ── File Sync — REMOVED ─────────────────────────────────────────
+// VPS decommissioned. Everything runs locally — no file sync needed.
+export function fileSyncStart(_workspaceId: string, _localPath: string): Promise<{ success: boolean }> {
+  return Promise.resolve({ success: false });
 }
 
 export function fileSyncStop(): Promise<{ success: boolean }> {
-  if (!api?.fileSyncStop) return Promise.resolve({ success: false });
-  return api.fileSyncStop() as Promise<{ success: boolean }>;
+  return Promise.resolve({ success: false });
 }
 
-export function fileSyncGetState(): Promise<SyncState> {
-  if (!api?.fileSyncGetState) return Promise.resolve({ status: 'disconnected', workspaceId: null, localPath: null, lastSynced: null, error: null, pendingChanges: 0 });
-  return api.fileSyncGetState() as Promise<SyncState>;
+export function fileSyncGetState(): SyncState {
+  return { status: 'disconnected', workspaceId: null, localPath: null, lastSynced: null, error: null, pendingChanges: 0 };
 }
 
-export function onFileSyncStateChanged(cb: (state: SyncState) => void): () => void {
-  if (!api?.onFileSyncStateChanged) return () => {};
-  return api.onFileSyncStateChanged(cb);
+export function onFileSyncStateChanged(_cb: (state: SyncState) => void): () => void {
+  return () => {};
 }
 
 // ── Browser API ────────────────────────────────────────────────────

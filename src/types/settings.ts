@@ -186,7 +186,7 @@ export const DEFAULT_SETTINGS: Settings = {
   audioInputDeviceId: '',
   groqApiKey: '',
   enableGroqOnSTTFailure: false,
-  instantStart: false,
+  instantStart: true,
   shortcuts: {
     'toggle-browser': 'Ctrl+Shift+B',
     'toggle-music': 'Ctrl+Shift+M',

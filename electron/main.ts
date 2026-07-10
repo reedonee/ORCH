@@ -457,6 +457,48 @@ ipcMain.handle('voice_is_ready', async () => {
   return voiceServer?.isReady() ?? false;
 });
 
+ipcMain.handle('voice_model_status', async () => {
+  const modelsDir = path.join(__dirname, '../electron/voice-models');
+  const parakeetDir = path.join(modelsDir, 'parakeet');
+  const kokoroDir = path.join(modelsDir, 'kokoro');
+
+  const status = {
+    serverRunning: voiceServer?.isReady() ?? false,
+    models: {
+      parakeet: {
+        present:
+          fs.existsSync(path.join(parakeetDir, 'encoder.int8.onnx')) &&
+          fs.existsSync(path.join(parakeetDir, 'decoder.int8.onnx')) &&
+          fs.existsSync(path.join(parakeetDir, 'joiner.int8.onnx')) &&
+          fs.existsSync(path.join(parakeetDir, 'tokens.txt')),
+        path: parakeetDir,
+      },
+      kokoro: {
+        present:
+          fs.existsSync(path.join(kokoroDir, 'kokoro-v1.0.onnx')) &&
+          fs.existsSync(path.join(kokoroDir, 'voices-v1.0.bin')),
+        path: kokoroDir,
+      },
+      whisper: {
+        // Whisper models are cached by faster-whisper in ~/.cache/huggingface/
+        present: false, // can't easily check — will be downloaded on first use
+        path: path.join(os.homedir(), '.cache', 'huggingface', 'hub'),
+      },
+    },
+  };
+  // Check whisper model directory
+  const whisperCache = path.join(os.homedir(), '.cache', 'huggingface', 'hub');
+  if (fs.existsSync(whisperCache)) {
+    try {
+      const dirs = fs.readdirSync(whisperCache);
+      status.models.whisper.present = dirs.some((d) =>
+        d.toLowerCase().includes('whisper')
+      );
+    } catch { /* ignore */ }
+  }
+  return status;
+});
+
 ipcMain.handle('voice_start_listening', async () => {
   if (!voiceServer?.isReady()) return;
   voiceServer.setCallbacks({

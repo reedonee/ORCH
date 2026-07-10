@@ -1,0 +1,19 @@
+# ORCH Voice Pipeline Dependencies
+# Install with: uv pip install -r electron/requirements-voice.txt
+
+# VAD
+silero-vad>=6.0
+
+# Parakeet TDT V3 STT (via sherpa-onnx)
+sherpa-onnx>=1.13
+huggingface-hub>=0.20
+
+# Whisper STT (fallback)
+faster-whisper>=1.0
+
+# Kokoro TTS (ONNX-based)
+kokoro-onnx>=0.5
+
+# Audio processing
+numpy>=2.0
+soundfile>=0.12

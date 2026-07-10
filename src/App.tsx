@@ -10,7 +10,8 @@ import { WorkspaceDialog } from './components/WorkspaceDialog';
 import { CinematicBootScreen } from './components/CinematicBootScreen';
 import { Bug } from 'lucide-react';
 import { useWorkspaceAutoSave } from './hooks/useWorkspaceAutoSave';
-import { useWorkspaceFileSync } from './hooks/useWorkspaceFileSync';
+// VPS file sync removed — everything runs locally
+// import { useWorkspaceFileSync } from './hooks/useWorkspaceFileSync';
 import { useAuthStore } from './stores/useAuthStore';
 import { AuthDialog } from './components/AuthDialog';
 import AdminPasswordPrompt from './components/AdminPasswordPrompt';
@@ -106,8 +107,8 @@ const App: React.FC = () => {
   // ── Wire up workspace auto-save (debounced file writes) ──
   useWorkspaceAutoSave();
 
-  // ── Wire up VPS file sync (auto-start/stop with workspace) ──
-  useWorkspaceFileSync();
+  // VPS file sync removed — everything runs locally
+  // useWorkspaceFileSync();
 
   // ── Agent lifecycle TTS ────────────────────────────────────
   useEffect(() => {

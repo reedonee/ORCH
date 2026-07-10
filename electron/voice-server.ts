@@ -51,9 +51,9 @@ export class VoiceServer {
     if (this.process) return;
     this.setState('loading');
 
-    // On Windows 'python3' is from Microsoft Store (python3=3.13, python=3.11)
-    // Use 'python3' since it has the voice packages installed
-    const pythonCmd = 'python3';
+    // On Windows use 'python' (python3 isn't available)
+    // On macOS/Linux try 'python3' first, fall back to 'python'
+    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
     console.log('[VoiceServer] Spawning:', pythonCmd, this.scriptPath);
     this.process = spawn(pythonCmd, ['-u', this.scriptPath], {
       stdio: ['pipe', 'pipe', 'pipe'],

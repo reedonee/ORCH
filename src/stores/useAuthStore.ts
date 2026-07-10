@@ -124,9 +124,9 @@ async function syncCloudData(): Promise<void> {
       if (prefs.value.default_provider) s.setDefaultProvider?.(prefs.value.default_provider);
       if (prefs.value.cloud_agents !== undefined) s.setCloudAgents?.(prefs.value.cloud_agents);
     }
-    // Load VPS connections in background
-    const { useVpsStore } = await import('./useVpsStore');
-    useVpsStore.getState().loadFromCloud();
+    // VPS connections removed — everything runs locally
+    // const { useVpsStore } = await import('./useVpsStore');
+    // useVpsStore.getState().loadFromCloud();
   } catch (err) {
     console.warn('[Cloud] Failed to sync preferences:', err);
   }

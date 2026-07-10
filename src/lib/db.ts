@@ -292,56 +292,10 @@ export async function deleteProviderConfig(providerId: string): Promise<void> {
 }
 
 // ═════════════════════════════════════════════════════════════════
-// VPS CONNECTIONS
+// VPS CONNECTIONS — REMOVED (everything runs locally)
+// The Supabase vps_connections table still exists for historical
+// data, but no local code uses it anymore.
 // ═════════════════════════════════════════════════════════════════
-
-export interface VpsConnectionRow {
-  id?: string;
-  name: string;
-  host: string;
-  port: number;
-  username: string;
-  auth_type: string;
-  ssh_key?: string;
-}
-
-/** List VPS connections. */
-export async function listVpsConnections(): Promise<VpsConnectionRow[]> {
-  const { data, error } = await db()
-    .from('vps_connections')
-    .select('*')
-    .order('name');
-
-  if (error) throw error;
-  return (data || []) as VpsConnectionRow[];
-}
-
-/** Upsert a VPS connection. */
-export async function upsertVpsConnection(conn: VpsConnectionRow): Promise<void> {
-  const uid = await currentUserId();
-  const { error } = await db()
-    .from('vps_connections')
-    .upsert({
-      user_id: uid,
-      ...conn,
-      updated_at: new Date().toISOString(),
-    });
-
-  if (error) throw error;
-}
-
-/** Delete a VPS connection. */
-export async function deleteVpsConnection(id: string): Promise<void> {
-  const { error } = await db()
-    .from('vps_connections')
-    .delete()
-    .eq('id', id);
-
-  if (error) throw error;
-}
-
-// ═════════════════════════════════════════════════════════════════
-// MCP SERVERS
 // ═════════════════════════════════════════════════════════════════
 
 export interface McpServerRow {

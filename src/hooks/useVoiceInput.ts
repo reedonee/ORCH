@@ -470,8 +470,13 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
     if (!text.trim()) { setVoiceState('idle'); return; }
     setVoiceState('speaking');
     startBargeMonitor();
-    // Local voice feedback only — VPS TTS decommissioned
-    setVoiceState('idle');
+    try {
+      // Route through the local voice sidecar — Kokoro TTS via IPC
+      await voiceSpeak('feedback', text);
+    } catch (err) {
+      console.warn('[Voice] TTS speak failed:', err);
+      setVoiceState('idle');
+    }
   }, [startBargeMonitor]);
 
   // ── Slot 1 ack: cached instant TTS ─────────────────────────
