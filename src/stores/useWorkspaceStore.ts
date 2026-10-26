@@ -241,14 +241,17 @@ function subscribeAgentLifecycle() {
     }
   });
 
-  // Browser/Music visibility
+  // Browser/Music visibility. Make room in the layout the user already
+  // chose, without moving the camera. This used to force a fresh 'grid'
+  // arrange and re-frame — every open of the browser threw away the
+  // user's layout mode and shuffled the canvas.
   useBrowserStore.subscribe((state, prevState) => {
     if (state.visible === prevState.visible) return;
-    debounceAutoArrange();
+    debounceReflowCurrentMode();
   });
   useMusicPlayerStore.subscribe((state, prevState) => {
     if (state.visible === prevState.visible) return;
-    debounceAutoArrange();
+    debounceReflowCurrentMode();
   });
 
   // Panel resize — re-arrange ONLY when a movable (non-locked) panel's size
@@ -356,6 +359,18 @@ function debounceAutoArrange() {
   autoArrangeTimer = setTimeout(() => {
     autoArrangeTimer = null;
     useWorkspaceStore.getState().autoArrange();
+  }, LAYOUT_ENGINE_SPEC.autoArrangeDebounceMs);
+}
+
+let reflowModeTimer: ReturnType<typeof setTimeout> | null = null;
+/** Re-run the active layout mode (grid if none) in place: same mode, no
+ *  camera move. For panels appearing/disappearing, not for "arrange". */
+function debounceReflowCurrentMode() {
+  if (reflowModeTimer) clearTimeout(reflowModeTimer);
+  reflowModeTimer = setTimeout(() => {
+    reflowModeTimer = null;
+    const ws = useWorkspaceStore.getState();
+    ws.arrange(ws.layoutMode ?? 'grid', { frame: false });
   }, LAYOUT_ENGINE_SPEC.autoArrangeDebounceMs);
 }
 

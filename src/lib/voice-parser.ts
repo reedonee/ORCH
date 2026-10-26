@@ -40,7 +40,9 @@ const LAYOUT_MODE_ALIASES: Record<string, string[]> = {
          'matrix', 'snap', 'align', 'normal', 'default', 'even', 'equal', 'tiles', 'tile'],
   focus: ['focus', 'focused', 'spotlight', 'hero', 'zoom', 'main', 'primary',
           'big', 'large', 'one big', 'presentation', 'present'],
-  stage: ['stage', 'theater', 'theatre', 'cinema', 'cinematic', 'browser', 'preview'],
+  // Not 'browser' or 'preview': anything said about the browser ("show the
+  // browser view") switched the whole canvas into stage layout.
+  stage: ['stage', 'theater', 'theatre', 'cinema', 'cinematic'],
   split: ['split', 'half', 'halves', 'side by side', 'side-by-side', 'two columns',
           'columns', 'compare', 'comparison', 'dual'],
   rail: ['rail', 'strip', 'row', 'filmstrip', 'film strip', 'line', 'horizontal', 'across'],

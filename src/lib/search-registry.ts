@@ -205,7 +205,9 @@ class SearchRegistry {
         description: 'Browser on the left, agents gridded on the right',
         category: 'action',
         actionType: 'instant',
-        tags: ['arrange', 'stage', 'presentation', 'browser', 'layout'],
+        // No 'browser' tag: searching "browser" must find the browser,
+        // not a layout that rearranges every card around it.
+        tags: ['arrange', 'stage', 'presentation', 'layout'],
         execute: () => useWorkspaceStore.getState().arrange('stage'),
       },
     );

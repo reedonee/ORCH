@@ -53,6 +53,12 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
     else if (reduceMotion) setFlip3d(false);
   }, [flipView, reduceMotion]);
   const in3d = flipView || flip3d;
+  // Position in the flip wave: cards turn one after another, left to right.
+  const flipOrder = useAppStore((s) => {
+    const sorted = [...s.agents].sort((a, b) => a.x - b.x || a.y - b.y);
+    return sorted.findIndex((a) => a.id === agent.id);
+  });
+  const flipDelay = Math.min(Math.max(flipOrder, 0) * 55, 330);
   const report = useAppStore((s) => s.agentReports[agent.id]);
   // NOT `useAppStore((s) => s.fileConflictsFor(agent.id))`: that selector
   // builds a NEW array on every call, so zustand sees a changed reference
@@ -208,6 +214,10 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
         boxSizing: 'border-box',
         zIndex,
         cursor: isDragging ? 'grabbing' : isResizing ? 'nwse-resize' : 'default',
+        // Depth for the flip. Without perspective a rotateY reads as the
+        // card squashing flat, not turning over. Only while 3D, so a
+        // resting card is never a 3D layer (that is what blurred its text).
+        perspective: in3d ? 1800 : undefined,
       }}
     >
       {/* Flip container. The back face is mounted while flipped so the
@@ -220,14 +230,19 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
           stretches when the canvas zooms: card text went soft, worst
           while zooming. Flat at rest, text is redrawn at every zoom. */}
       <div
-        onTransitionEnd={(e) => {
-          if (e.target === e.currentTarget && e.propertyName === 'transform' && !flipView) setFlip3d(false);
+        onAnimationEnd={(e) => {
+          if (e.target === e.currentTarget && !flipView) setFlip3d(false);
         }}
         style={{
           width: '100%', height: '100%', position: 'relative',
           transformStyle: in3d ? 'preserve-3d' : 'flat',
-          transform: in3d ? (flipView ? 'rotateY(180deg)' : 'rotateY(0deg)') : 'none',
-          transition: reduceMotion ? 'none' : 'transform 520ms cubic-bezier(0.22, 1, 0.36, 1)',
+          // Keyframed rather than a plain transition: the card lifts and
+          // dips through the turn, and cards flip in a left-to-right wave
+          // (flipDelay) instead of all at once.
+          transform: in3d && reduceMotion ? (flipView ? 'rotateY(180deg)' : 'none') : undefined,
+          animation: in3d && !reduceMotion
+            ? `${flipView ? 'orch-flip-to-back' : 'orch-flip-to-front'} 680ms cubic-bezier(0.2, 0.8, 0.2, 1) ${flipDelay}ms both`
+            : undefined,
         }}
       >
       <GlassPanel
@@ -277,6 +292,9 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
           zIndex: 0,
           backfaceVisibility: in3d ? 'hidden' : undefined,
           WebkitBackfaceVisibility: in3d ? 'hidden' : undefined,
+          // Chromium hit-tests the turned-away front even with its
+          // backface hidden, so clicks meant for the back landed here.
+          pointerEvents: flipView ? 'none' : undefined,
         }}
       >
         {/* Frosted glass noise overlay */}
@@ -534,10 +552,14 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
         </div>
       </GlassPanel>
 
-        {/* Back face — rotated into place, only present while 3D. */}
+        {/* Back face — rotated into place, only present while 3D.
+            Clicking it flips every card back over. */}
         <div
+          onClick={() => window.dispatchEvent(new Event('orch-flip-back'))}
+          title="Click to flip back"
           style={{
             display: in3d ? undefined : 'none',
+            cursor: 'pointer',
             position: 'absolute', inset: 0,
             transform: 'rotateY(180deg)',
             backfaceVisibility: 'hidden',

@@ -114,4 +114,19 @@ for (const [u, kind, query, clear] of controllerCases) {
   if (good) cp++; else { cf++; console.log(`FAIL  "${u}" -> ${JSON.stringify(c)} (want ${kind} ${query ?? ''}${clear ? ' clear' : ''})`); }
 }
 console.log(`controller pass=${cp} fail=${cf}`);
-if (af || cf) process.exit(1);
+
+console.log('\n--- browser never means stage layout ---');
+// "browser" and "preview" used to be stage-layout aliases, so talking
+// about the browser rearranged the whole canvas into stage.
+let bp = 0, bf = 0;
+for (const u of ['show the browser view', 'browser view', 'open the browser preview', 'browser preview', 'browser mode']) {
+  const c = parseVoiceCommand(u) as any;
+  const bad = c.kind === 'arrange' && c.mode === 'stage';
+  if (!bad) bp++; else { bf++; console.log(`FAIL  "${u}" -> arrange/stage`); }
+}
+for (const [u, mode] of [['stage view', 'stage'], ['theater mode', 'stage']] as const) {
+  const c = parseVoiceCommand(u) as any;
+  if (c.kind === 'arrange' && c.mode === mode) bp++; else { bf++; console.log(`FAIL  "${u}" -> ${c.kind}/${c.mode} (want arrange/${mode})`); }
+}
+console.log(`browser-vs-stage pass=${bp} fail=${bf}`);
+if (af || cf || bf) process.exit(1);
