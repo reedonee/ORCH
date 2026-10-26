@@ -7,6 +7,7 @@ import fs from 'fs';
 import os from 'os';
 import { OrchMcpServer, type SyncEvent } from './mcp-server.js';
 import { mcpLaunchArgs, mcpLaunchEnv, CLI_REGISTERED_PROVIDERS, HERMES_ORCH_ENTRY } from './mcp-agent-config.js';
+import { inheritedAgentEnv } from './agent-env.js';
 import { VoiceServer } from './voice-server.js';
 import {
   initLocalDb, getDbPath,
@@ -1315,30 +1316,36 @@ ipcMain.handle('create_terminal', async (_event, { agentId, name, command, args,
     }
 
     const p = getPty();
+    // The whole environment is kept on the session, so waking a hibernated
+    // agent restores its identity and MCP settings as well.
+    const agentEnv: Record<string, string> = {
+      // Not raw process.env: an inherited NO_COLOR, or the markers of a
+      // Claude Code session that launched ORCH, broke every agent.
+      ...inheritedAgentEnv(process.env),
+      ...shellEnv,
+      COLORTERM: 'truecolor',
+      TERM: 'xterm-256color',
+      // Every mesh tool is keyed by agent id. Without this the agent
+      // has no way to identify itself and agent_set_status / agent_send
+      // are unusable from inside the terminal.
+      ORCH_AGENT_ID: agentId || name,
+      ORCH_AGENT_NAME: name,
+      ORCH_SESSION_ID: sessionId,
+      ORCH_MCP_URL: mcpServer?.url || '',
+      // Codex and Hermes read the bearer token from here rather than
+      // from a config file, so no credential is written to disk.
+      ORCH_MCP_TOKEN: mcpServer?.token || '',
+      // Per-agent endpoint (ORCH_MCP_HTTP_URL) and, for OpenCode, its
+      // inline config.
+      ...mcpEnv,
+    };
+
     const ptyProcess = p.spawn(shell, shellArgs, {
       name: 'xterm-256color',
       cols: 140,
       rows: 40,
       cwd,
-      env: {
-        ...process.env,
-        ...shellEnv,
-        COLORTERM: 'truecolor',
-        TERM: 'xterm-256color',
-        // Every mesh tool is keyed by agent id. Without this the agent
-        // has no way to identify itself and agent_set_status / agent_send
-        // are unusable from inside the terminal.
-        ORCH_AGENT_ID: agentId || name,
-        ORCH_AGENT_NAME: name,
-        ORCH_SESSION_ID: sessionId,
-        ORCH_MCP_URL: mcpServer?.url || '',
-        // Codex and Hermes read the bearer token from here rather than
-        // from a config file, so no credential is written to disk.
-        ORCH_MCP_TOKEN: mcpServer?.token || '',
-        // Per-agent endpoint (ORCH_MCP_HTTP_URL) and, for OpenCode, its
-        // inline config.
-        ...mcpEnv,
-      },
+      env: agentEnv,
     });
 
     const session: PtySession = {
@@ -1352,7 +1359,7 @@ ipcMain.handle('create_terminal', async (_event, { agentId, name, command, args,
       hibernating: false,
       shell,
       shellArgs,
-      shellEnv,
+      shellEnv: agentEnv,
       providerId: providerId || '',
       delegationDepth: delegationDepth || 0,
       contextSnapshot: contextSnapshot || JSON.stringify({}),

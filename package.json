@@ -1,7 +1,7 @@
 {
   "name": "orch-electron",
   "private": true,
-  "version": "0.0.5",
+  "version": "0.0.6",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -11,7 +11,7 @@
     "lint": "eslint . --max-warnings 231",
     "release": "electron-builder --publish always",
     "release:dry": "electron-builder --publish never",
-    "test": "node --experimental-strip-types tests/layout-modes.check.mts && node --experimental-strip-types tests/voice-parser.check.mts && node --experimental-strip-types tests/voice-narration.check.mts && node --experimental-strip-types tests/voice-audio.check.mts && node --experimental-strip-types tests/canvas-geometry.check.mts && node --experimental-strip-types --import ./tests/ts-resolve-hook.mjs tests/canvas-store.check.mts && node --experimental-strip-types tests/color.check.mts && node --experimental-strip-types tests/agent-mesh.check.mts && node --experimental-strip-types tests/mcp-agent-config.check.mts && node --experimental-strip-types tests/agent-approvals.check.mts && node --experimental-strip-types --import ./tests/ts-resolve-hook.mjs tests/mcp-server.check.mts && node tests/run-sidecar-check.mjs",
+    "test": "node --experimental-strip-types tests/layout-modes.check.mts && node --experimental-strip-types tests/voice-parser.check.mts && node --experimental-strip-types tests/voice-narration.check.mts && node --experimental-strip-types tests/voice-audio.check.mts && node --experimental-strip-types tests/canvas-geometry.check.mts && node --experimental-strip-types --import ./tests/ts-resolve-hook.mjs tests/canvas-store.check.mts && node --experimental-strip-types tests/color.check.mts && node --experimental-strip-types tests/agent-mesh.check.mts && node --experimental-strip-types tests/mcp-agent-config.check.mts && node --experimental-strip-types tests/agent-approvals.check.mts && node --experimental-strip-types tests/agent-env.check.mts && node --experimental-strip-types --import ./tests/ts-resolve-hook.mjs tests/mcp-server.check.mts && node tests/run-sidecar-check.mjs",
     "typecheck": "tsc -b",
     "test:layout": "node --experimental-strip-types tests/layout-modes.check.mts",
     "test:voice": "node --experimental-strip-types tests/voice-parser.check.mts",

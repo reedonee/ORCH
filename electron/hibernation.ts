@@ -3,6 +3,7 @@
 // wake (spawn + replay buffer). Enforces max concurrent processes.
 
 import type { IPty } from 'node-pty';
+import { inheritedAgentEnv } from './agent-env.js';
 
 export interface PtySession {
   pty: IPty | null;           // null when hibernating
@@ -135,7 +136,10 @@ export class HibernationManager {
         cols: 140,
         rows: 40,
         cwd: process.cwd(),
-        env: shellEnv ? { ...process.env, ...shellEnv } : process.env,
+        // shellEnv is the agent's complete environment as first spawned
+        // (identity, MCP endpoint, the cleaned inherited env). Re-merging
+        // raw process.env would bring back an inherited NO_COLOR.
+        env: shellEnv ?? inheritedAgentEnv(process.env),
       });
 
       session.pty = ptyProcess;
