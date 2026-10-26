@@ -284,7 +284,7 @@ const CanvasSection: React.FC = () => {
             min={0} max={40} step={2}
             format={(v) => `${v}px`}
             onChange={setCardBlur}
-            hint="Frosts whatever is behind a card. Without blur, a transparent card makes text hard to read over a busy background."
+            hint="Frosts whatever is behind a card. Off gives the sharpest text: with blur on, Windows can't use ClearType for card text, so it looks slightly softer."
           />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Terminal transparency</div>

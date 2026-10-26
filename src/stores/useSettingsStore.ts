@@ -136,7 +136,10 @@ export const useSettingsStore = create<SettingsState>()(
 
       cardOpacity: 0.72,
       setCardOpacity: (v) => set({ cardOpacity: Math.max(0.35, Math.min(1, v)) }),
-      cardBlur: 18,
+      // Off by default: any backdrop blur draws the card as its own
+      // transparent layer, where Windows cannot use ClearType, so card text
+      // is visibly softer. Opacity alone still reads as glass.
+      cardBlur: 0,
       setCardBlur: (v) => set({ cardBlur: Math.max(0, Math.min(40, v)) }),
       terminalScrim: 0,
       setTerminalScrim: (v) => set({ terminalScrim: Math.max(0, Math.min(1, v)) }),
@@ -171,7 +174,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'orch-settings',
-      version: 12, // v12: terminal scrim off by default
+      version: 13, // v13: backdrop blur off by default
       migrate: (persisted: any, version: number) => {
         // Carry over custom providers from previous version if any
         const oldCustom = version < 7 ? [] : (persisted.customProviders || []);
@@ -182,6 +185,9 @@ export const useSettingsStore = create<SettingsState>()(
         // tinted it and hid card transparency/blur. Reset only the untouched
         // default; a value the user chose is kept.
         if (version < 12 && clean.terminalScrim === 0.72) clean.terminalScrim = 0;
+        // v13: blur softens card text (no ClearType in a blurred layer), so
+        // it starts off once for everyone; re-enabling it in Settings sticks.
+        if (version < 13) clean.cardBlur = 0;
         return { ...DEFAULT_SETTINGS, ...clean, providers: mergeProviders(oldCustom), customProviders: oldCustom };
       },
       partialize: (state) => ({
