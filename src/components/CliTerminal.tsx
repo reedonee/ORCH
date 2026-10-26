@@ -66,20 +66,12 @@ function ensureXtermStyles(): void {
     /* Search hit styling — the addon sets these CSS custom properties. */
     .xterm .xterm-decoration-overview-ruler { z-index: 8; }
 
-    /* ── Full transparency ──────────────────────────────────────
-       A TUI paints its own panels by setting cell background colours.
-       Those arrive as basic (40-47), bright (100-107) and TRUECOLOR
-       (48;2;r;g;b) escapes. Theme overrides can only reach the first two
-       — truecolour is per-cell and unthemeable — which is why solid
-       blocks kept surviving behind labels and status bars.
-
-       With the DOM renderer each styled run is a span carrying an inline
-       background-color, and !important is the one case where CSS beats
-       an inline style. So this reaches every background regardless of how
-       it was specified. Selection still shows: the DOM renderer draws it
-       as a separate layer, not as cell backgrounds. */
-    .orch-term-transparent .xterm-rows span { background-color: transparent !important; }
-    .orch-term-transparent .xterm-rows > div { background-color: transparent !important; }
+    /* Cell backgrounds are left alone. Stripping every one of them (as an
+       earlier "full transparency" rule did) also stripped the colour TUIs
+       use to carry meaning — diff additions and removals, the selected
+       option, the prompt box — and agents rendered black-and-white. ANSI
+       black and bright-black are translucent in the theme instead, so the
+       plain dark panels most TUIs draw still read as tinted glass. */
   `;
   document.head.appendChild(style);
 }
@@ -206,10 +198,11 @@ export const CliTerminal: React.FC<CliTerminalProps> = ({ sessionId, agentName }
       // Draw bold as bold rather than as a bright colour, so bold text
       // doesn't silently change meaning-carrying colours.
       drawBoldTextInBrightColors: false,
-      // 7:1 is WCAG AAA. Over a photographic backdrop the effective
-      // contrast is worse than the nominal figure suggests, so aim high
-      // and let xterm lift any pair that falls short.
-      minimumContrastRatio: 7,
+      // No minimumContrastRatio. xterm measures contrast against the
+      // theme background, which here is fully transparent and so counts
+      // as black; a 7:1 floor pushed every agent's palette toward white
+      // and the terminals read as black-and-white. Legibility over a
+      // bright wallpaper is the scrim's job (Settings → Appearance).
       scrollOnUserInput: true,
       smoothScrollDuration: 0,
       theme: {
@@ -569,24 +562,28 @@ export const CliTerminal: React.FC<CliTerminalProps> = ({ sessionId, agentName }
         </div>
       )}
 
-      {/* Terminal surface.
-          The scrim is what actually makes text readable on a transparent
-          card: blur alone softens the backdrop but does not darken it, so
-          light glyphs over a bright wallpaper stay low-contrast no matter
-          how much blur is applied. Card transparency and terminal
-          legibility are genuinely different needs, so this has its own
-          control (Settings → Appearance → Terminal readability). */}
+      {/* Terminal surface. The card behind it supplies the glass (its
+          opacity and blur are Settings → Appearance), so the terminal is
+          see-through by default and those settings apply to the whole
+          card, not just its title bar and edges.
+
+          The optional scrim darkens just the terminal for legibility over
+          a bright wallpaper. It is off by default and tinted with the
+          theme: a fixed dark-green layer at 72% used to cover the whole
+          card body, which both coloured every terminal and hid any change
+          to card transparency or blur. */}
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        <div
-          aria-hidden="true"
-          style={{
-            position: 'absolute', inset: 0, pointerEvents: 'none',
-            background: `rgba(6, 14, 11, ${terminalScrim})`,
-          }}
-        />
+        {terminalScrim > 0 && (
+          <div
+            aria-hidden="true"
+            style={{
+              position: 'absolute', inset: 0, pointerEvents: 'none',
+              background: withAlpha(theme.colors.bg, terminalScrim),
+            }}
+          />
+        )}
         <div
           ref={containerRef}
-          className={terminalTransparency === 'full' ? 'orch-term-transparent' : undefined}
           style={{ position: 'absolute', inset: 0 }}
         />
       </div>

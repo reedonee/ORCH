@@ -23,14 +23,13 @@ interface SettingsState extends Settings {
   /** Backdrop blur behind translucent surfaces, in px. */
   cardBlur: number;
   setCardBlur: (v: number) => void;
-  /** Darkness of the scrim behind terminal text, 0 (none) → 1 (opaque).
-   *  Independent of card transparency because terminal text needs far
-   *  more contrast than chrome does. */
+  /** Optional darkening behind terminal text, 0 (none, the default) → 1.
+   *  Off by default so card transparency and blur reach the whole card. */
   terminalScrim: number;
   setTerminalScrim: (v: number) => void;
-  /** 'full' = no cell background ever paints (DOM renderer, uniform glass).
-   *  'gpu'  = WebGL renderer; faster, but a TUI's own background colours
-   *           still paint as solid blocks. */
+  /** 'full' = DOM renderer: see-through, keeps every TUI colour.
+   *  'gpu'  = WebGL renderer; faster, but may draw a TUI's dark panels
+   *           as solid blocks. */
   terminalTransparency: 'full' | 'gpu';
   setTerminalTransparency: (v: 'full' | 'gpu') => void;
   /** Respect the OS "reduce motion" preference and damp animations. */
@@ -139,7 +138,7 @@ export const useSettingsStore = create<SettingsState>()(
       setCardOpacity: (v) => set({ cardOpacity: Math.max(0.35, Math.min(1, v)) }),
       cardBlur: 18,
       setCardBlur: (v) => set({ cardBlur: Math.max(0, Math.min(40, v)) }),
-      terminalScrim: 0.72,
+      terminalScrim: 0,
       setTerminalScrim: (v) => set({ terminalScrim: Math.max(0, Math.min(1, v)) }),
       terminalTransparency: 'full',
       setTerminalTransparency: (v) => set({ terminalTransparency: v }),
@@ -172,13 +171,17 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'orch-settings',
-      version: 11, // v11: removed providerModes (VPS decommissioned)
+      version: 12, // v12: terminal scrim off by default
       migrate: (persisted: any, version: number) => {
         // Carry over custom providers from previous version if any
         const oldCustom = version < 7 ? [] : (persisted.customProviders || []);
         // v11: strip stale providerModes key from localStorage
         const clean = { ...persisted };
         delete clean.providerModes;
+        // v12: the old 0.72 default scrim covered the whole terminal, which
+        // tinted it and hid card transparency/blur. Reset only the untouched
+        // default; a value the user chose is kept.
+        if (version < 12 && clean.terminalScrim === 0.72) clean.terminalScrim = 0;
         return { ...DEFAULT_SETTINGS, ...clean, providers: mergeProviders(oldCustom), customProviders: oldCustom };
       },
       partialize: (state) => ({

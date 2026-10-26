@@ -290,8 +290,8 @@ const CanvasSection: React.FC = () => {
             <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Terminal transparency</div>
             <div style={{ display: 'flex', gap: 6 }}>
               {([
-                { id: 'full' as const, label: 'Full', desc: 'No background ever paints. Uniform glass, slightly slower.' },
-                { id: 'gpu' as const,  label: 'GPU',  desc: 'Faster rendering, but a TUI’s own panels stay solid.' },
+                { id: 'full' as const, label: 'Full', desc: 'See-through, and every colour the agent draws is kept.' },
+                { id: 'gpu' as const,  label: 'GPU',  desc: 'Faster rendering, but a TUI’s dark panels may draw solid.' },
               ]).map(({ id, label, desc }) => (
                 <button
                   key={id}
@@ -310,8 +310,8 @@ const CanvasSection: React.FC = () => {
               ))}
             </div>
             <div style={{ fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-              Full mode reaches truecolour backgrounds that theming cannot.
-              Reopen a terminal for a change to take effect.
+              Card transparency and blur above apply to the whole card,
+              terminal included. Reopen a terminal for a change here to take effect.
             </div>
           </div>
 
@@ -321,7 +321,7 @@ const CanvasSection: React.FC = () => {
             min={0} max={100} step={5}
             format={(v) => `${v}%`}
             onChange={(v) => setTerminalScrim(v / 100)}
-            hint="Darkens the surface behind terminal text. Card transparency alone leaves light text hard to read over a bright wallpaper — this is the control that fixes it."
+            hint="Optional. Darkens just the terminal, in your theme's colour, if light text is hard to read over a bright wallpaper. 0% keeps the terminal as clear as the card."
           />
           <Slider
             label="Terminal font size"
