@@ -45,6 +45,14 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
   const cardBlur = useSettingsStore((s) => s.cardBlur);
   const reduceMotion = useSettingsStore((s) => s.reduceMotion);
   const flipView = useAppStore((s) => s.flipView);
+  // True from the start of a flip until the card has turned back to its
+  // front; the card is flat (and its text crisp) the rest of the time.
+  const [flip3d, setFlip3d] = useState(flipView);
+  useEffect(() => {
+    if (flipView) setFlip3d(true);
+    else if (reduceMotion) setFlip3d(false);
+  }, [flipView, reduceMotion]);
+  const in3d = flipView || flip3d;
   const report = useAppStore((s) => s.agentReports[agent.id]);
   // NOT `useAppStore((s) => s.fileConflictsFor(agent.id))`: that selector
   // builds a NEW array on every call, so zustand sees a changed reference
@@ -202,14 +210,23 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
         cursor: isDragging ? 'grabbing' : isResizing ? 'nwse-resize' : 'default',
       }}
     >
-      {/* 3D flip container. The back face is always mounted so the
+      {/* Flip container. The back face is mounted while flipped so the
           terminal underneath is never unmounted by a flip — remounting
-          xterm would drop scrollback and reset the shell's view. */}
+          xterm would drop scrollback and reset the shell's view.
+
+          3D only while flipping or flipped. A permanent preserve-3d /
+          rotateY(0) / backface-visibility made the whole card a 3D
+          composited layer, which the browser rasterises once and then
+          stretches when the canvas zooms: card text went soft, worst
+          while zooming. Flat at rest, text is redrawn at every zoom. */}
       <div
+        onTransitionEnd={(e) => {
+          if (e.target === e.currentTarget && e.propertyName === 'transform' && !flipView) setFlip3d(false);
+        }}
         style={{
           width: '100%', height: '100%', position: 'relative',
-          transformStyle: 'preserve-3d',
-          transform: flipView ? 'rotateY(180deg)' : 'rotateY(0deg)',
+          transformStyle: in3d ? 'preserve-3d' : 'flat',
+          transform: in3d ? (flipView ? 'rotateY(180deg)' : 'rotateY(0deg)') : 'none',
           transition: reduceMotion ? 'none' : 'transform 520ms cubic-bezier(0.22, 1, 0.36, 1)',
         }}
       >
@@ -239,8 +256,8 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
           // pasted on top. Blur is essential to that: transparency
           // without it just shows a busy background through the text and
           // destroys readability. Both are user-tunable in Settings →
-          // Appearance, and the terminal keeps its own contrast floor
-          // (minimumContrastRatio) so text stays legible at any setting.
+          // Appearance; the optional terminal scrim there darkens just the
+          // terminal when a bright wallpaper needs it.
           background: `linear-gradient(135deg, ${withAlpha(themeColors.bgAlt, cardOpacity)} 0%, ${withAlpha(themeColors.bg, Math.min(1, cardOpacity + 0.08))} 100%)`,
           backdropFilter: cardBlur > 0 ? `blur(${cardBlur}px) saturate(1.35)` : undefined,
           WebkitBackdropFilter: cardBlur > 0 ? `blur(${cardBlur}px) saturate(1.35)` : undefined,
@@ -258,8 +275,8 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
               : 'inset 0 1px 0 rgba(255,255,255,0.05)',
           position: 'relative',
           zIndex: 0,
-          backfaceVisibility: 'hidden',
-          WebkitBackfaceVisibility: 'hidden',
+          backfaceVisibility: in3d ? 'hidden' : undefined,
+          WebkitBackfaceVisibility: in3d ? 'hidden' : undefined,
         }}
       >
         {/* Frosted glass noise overlay */}
@@ -517,9 +534,10 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
         </div>
       </GlassPanel>
 
-        {/* Back face — rotated into place, hidden until the card flips. */}
+        {/* Back face — rotated into place, only present while 3D. */}
         <div
           style={{
+            display: in3d ? undefined : 'none',
             position: 'absolute', inset: 0,
             transform: 'rotateY(180deg)',
             backfaceVisibility: 'hidden',
