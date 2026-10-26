@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GlassPanel } from './GlassPanel';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { useProviderStore } from '../stores/useProviderStore';
@@ -7,9 +7,9 @@ import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
 import { useWorkspaceStore, LAYOUT_ENGINE_SPEC } from '../stores/useWorkspaceStore';
 import { useAuthStore } from '../stores/useAuthStore';
 import { useMusicPlayerStore } from '../stores/useMusicPlayerStore';
-import { X, Palette, Layout, Keyboard, Mic, Bot, Key, Plug, User, Grid3X3, Theater } from 'lucide-react';
+import { X, Palette, Layout, Keyboard, Mic, Bot, Key, Plug, User, Grid3X3, Theater, Crosshair, Columns2, Rows3, Share2, Volume2 } from 'lucide-react';
 import { VisualThemeEngine } from './VisualThemeEngine';
-import { getMcpUrl, installProvider, onInstallProgress, voiceModelStatus } from '../lib/electron-api';
+import { getMcpUrl, installProvider, onInstallProgress, voiceModelStatus, voiceConfigure, voiceSpeak } from '../lib/electron-api';
 import { PROVIDER_ICONS } from './icons/ProviderIcon';
 import type { ProviderStatus } from '../types/provider';
 import type { AgentProvider } from '../types/settings';
@@ -50,6 +50,42 @@ const Toggle: React.FC<{ checked: boolean; onChange: (v: boolean) => void; disab
       transition: 'left var(--anim-fast)',
     }} />
   </button>
+);
+
+/** Labelled range control with a live value read-out. Every slider in
+ *  this dialog was previously hand-rolled, so they drifted in spacing,
+ *  and none carried an accessible name. */
+const Slider: React.FC<{
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  format?: (v: number) => string;
+  onChange: (v: number) => void;
+  hint?: string;
+}> = ({ label, value, min, max, step = 1, format, onChange, hint }) => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <label htmlFor={`sl-${label}`} style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{label}</label>
+      <span style={{
+        padding: '2px 10px', borderRadius: 'var(--radius-pill)', fontSize: 11,
+        minWidth: 52, textAlign: 'center',
+        background: 'var(--glass-bg)', border: '1px solid var(--border)',
+      }}>
+        {format ? format(value) : value}
+      </span>
+    </div>
+    <input
+      id={`sl-${label}`}
+      type="range" min={min} max={max} step={step} value={value}
+      aria-label={label}
+      aria-valuetext={format ? format(value) : String(value)}
+      onChange={(e) => onChange(Number(e.target.value))}
+      style={{ width: '100%', accentColor: 'var(--accent)' }}
+    />
+    {hint && <div style={{ fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>{hint}</div>}
+  </div>
 );
 
 const glassCard: React.CSSProperties = {
@@ -123,10 +159,30 @@ const StyleSection: React.FC = () => {
 // ── Canvas ────────────────────────────────────────────────────────
 
 const CanvasSection: React.FC = () => {
-  const { terminalFontSize, setTerminalFontSize, gridSnap, setGridSnap, showGrid, setShowGrid } = useSettingsStore();
+  // Selector subscriptions — this dialog used to pull whole stores in
+  // nine places, so opening it re-rendered on every unrelated change.
+  const terminalFontSize = useSettingsStore((s) => s.terminalFontSize);
+  const setTerminalFontSize = useSettingsStore((s) => s.setTerminalFontSize);
+  const gridSnap = useSettingsStore((s) => s.gridSnap);
+  const setGridSnap = useSettingsStore((s) => s.setGridSnap);
+  const showGrid = useSettingsStore((s) => s.showGrid);
+  const setShowGrid = useSettingsStore((s) => s.setShowGrid);
+  const cardOpacity = useSettingsStore((s) => s.cardOpacity);
+  const setCardOpacity = useSettingsStore((s) => s.setCardOpacity);
+  const cardBlur = useSettingsStore((s) => s.cardBlur);
+  const setCardBlur = useSettingsStore((s) => s.setCardBlur);
+  const terminalScrim = useSettingsStore((s) => s.terminalScrim);
+  const setTerminalScrim = useSettingsStore((s) => s.setTerminalScrim);
+  const terminalTransparency = useSettingsStore((s) => s.terminalTransparency);
+  const setTerminalTransparency = useSettingsStore((s) => s.setTerminalTransparency);
+  const reduceMotion = useSettingsStore((s) => s.reduceMotion);
+  const setReduceMotion = useSettingsStore((s) => s.setReduceMotion);
+
   const layoutMode = useWorkspaceStore((s) => s.layoutMode);
   const settings = useWorkspaceStore((s) => s.settings);
-  const { arrangeTidy, arrangeGrid, arrangeStage, setLayoutMode, toggleSetting } = useWorkspaceStore.getState();
+  const arrange = useWorkspaceStore((s) => s.arrange);
+  const setLayoutMode = useWorkspaceStore((s) => s.setLayoutMode);
+  const toggleSetting = useWorkspaceStore((s) => s.toggleSetting);
   const gridSize = LAYOUT_ENGINE_SPEC.arrangements.gridSnap;
 
   return (
@@ -135,25 +191,24 @@ const CanvasSection: React.FC = () => {
       <div>
         <SectionHeader>Agent Layout</SectionHeader>
         <div style={glassCard}>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginBottom: 14 }}>
             {([
-              { id: 'tidy' as const,  label: 'Tidy',  icon: <Grid3X3 size={14} />, desc: 'Flow arrange all windows' },
-              { id: 'grid' as const,  label: 'Grid',  icon: <Layout size={14} />,  desc: 'Matrix grid alignment' },
-              { id: 'stage' as const, label: 'Stage', icon: <Theater size={14} />, desc: 'Cinematic focus layout' },
+              { id: 'grid' as const,          label: 'Grid',   icon: <Grid3X3 size={14} />, desc: 'Even cells, sized to your window' },
+              { id: 'focus' as const,         label: 'Focus',  icon: <Crosshair size={14} />, desc: 'Selected agent large, rest in a rail' },
+              { id: 'split' as const,         label: 'Split',  icon: <Columns2 size={14} />, desc: 'Two balanced columns' },
+              { id: 'rail' as const,          label: 'Rail',   icon: <Rows3 size={14} />, desc: 'Single horizontal strip' },
+              { id: 'constellation' as const, label: 'Cluster',icon: <Share2 size={14} />, desc: 'Group by delegation links' },
+              { id: 'stage' as const,         label: 'Stage',  icon: <Theater size={14} />, desc: 'Browser left, agents right' },
             ]).map(({ id, label, icon, desc }) => {
               const active = layoutMode === id;
               return (
                 <button
                   key={id}
-                  onClick={() => {
-                    if (active) setLayoutMode(null);
-                    else if (id === 'tidy') arrangeTidy();
-                    else if (id === 'grid') arrangeGrid();
-                    else if (id === 'stage') arrangeStage();
-                  }}
+                  onClick={() => { if (active) setLayoutMode(null); else arrange(id); }}
                   title={desc}
+                  aria-pressed={active}
                   style={{
-                    flex: 1, padding: '10px 6px',
+                    padding: '10px 6px',
                     display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
                     borderRadius: 'var(--radius-md)',
                     border: active ? '1.5px solid var(--accent)' : '1px solid var(--border)',
@@ -211,19 +266,79 @@ const CanvasSection: React.FC = () => {
         </div>
       </div>
 
-      {/* Terminal font size */}
+      {/* Appearance */}
       <div>
-        <SectionHeader>Terminal Font</SectionHeader>
-        <div style={glassCard}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input type="range" min={10} max={20} step={1}
-              value={terminalFontSize}
-              onChange={(e) => setTerminalFontSize(Number(e.target.value))}
-              style={{ flex: 1, accentColor: 'var(--accent)' }}
-            />
-            <span style={{ padding: '3px 12px', borderRadius: 'var(--radius-pill)', fontSize: 12, minWidth: 48, textAlign: 'center', background: 'var(--glass-bg)', border: '1px solid var(--border)' }}>
-              {terminalFontSize}px
-            </span>
+        <SectionHeader>Appearance</SectionHeader>
+        <div style={{ ...glassCard, display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <Slider
+            label="Card transparency"
+            value={Math.round((1 - cardOpacity) * 100)}
+            min={0} max={65} step={5}
+            format={(v) => `${v}%`}
+            onChange={(v) => setCardOpacity(1 - v / 100)}
+            hint="How much of the canvas shows through agent cards."
+          />
+          <Slider
+            label="Backdrop blur"
+            value={cardBlur}
+            min={0} max={40} step={2}
+            format={(v) => `${v}px`}
+            onChange={setCardBlur}
+            hint="Frosts whatever is behind a card. Without blur, a transparent card makes text hard to read over a busy background."
+          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Terminal transparency</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {([
+                { id: 'full' as const, label: 'Full', desc: 'No background ever paints. Uniform glass, slightly slower.' },
+                { id: 'gpu' as const,  label: 'GPU',  desc: 'Faster rendering, but a TUI’s own panels stay solid.' },
+              ]).map(({ id, label, desc }) => (
+                <button
+                  key={id}
+                  onClick={() => setTerminalTransparency(id)}
+                  title={desc}
+                  aria-pressed={terminalTransparency === id}
+                  style={{
+                    flex: 1, padding: '8px 10px', borderRadius: 'var(--radius-sm)',
+                    border: terminalTransparency === id ? '1.5px solid var(--accent)' : '1px solid var(--border)',
+                    background: terminalTransparency === id ? 'var(--accent)12' : 'transparent',
+                    color: 'var(--text)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit',
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div style={{ fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+              Full mode reaches truecolour backgrounds that theming cannot.
+              Reopen a terminal for a change to take effect.
+            </div>
+          </div>
+
+          <Slider
+            label="Terminal readability"
+            value={Math.round(terminalScrim * 100)}
+            min={0} max={100} step={5}
+            format={(v) => `${v}%`}
+            onChange={(v) => setTerminalScrim(v / 100)}
+            hint="Darkens the surface behind terminal text. Card transparency alone leaves light text hard to read over a bright wallpaper — this is the control that fixes it."
+          />
+          <Slider
+            label="Terminal font size"
+            value={terminalFontSize}
+            min={9} max={22} step={1}
+            format={(v) => `${v}px`}
+            onChange={setTerminalFontSize}
+            hint="Per-terminal overrides: Ctrl +, Ctrl -, Ctrl 0 to reset."
+          />
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Reduce motion</div>
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>
+                Shortens layout animations and disables decorative movement.
+              </div>
+            </div>
+            <Toggle checked={reduceMotion} onChange={setReduceMotion} />
           </div>
         </div>
       </div>
@@ -355,6 +470,8 @@ const ShortcutsSection: React.FC = () => {
 
 const AgentsSection: React.FC = () => {
   const { providers } = useSettingsStore();
+  const defaultApprovalMode = useSettingsStore((s) => s.defaultApprovalMode);
+  const setDefaultApprovalMode = useSettingsStore((s) => s.setDefaultApprovalMode);
   const [installStates, setInstallStates] = useState<Record<string, { phase: string; percent: number; message: string }>>({});
   const [statuses, setStatuses] = useState<Record<string, ProviderStatus>>({});
   const [probed, setProbed] = useState(false);
@@ -391,7 +508,7 @@ const AgentsSection: React.FC = () => {
   const handleInstall = async (p: AgentProvider) => {
     setInstallStates((prev) => ({ ...prev, [p.id]: { phase: 'starting', percent: 0, message: 'Starting install...' } }));
     try {
-      await installProvider(p.id, p.command);
+      await installProvider(p.id);
     } catch (err: any) {
       setInstallStates((prev) => ({ ...prev, [p.id]: { phase: 'error', percent: 0, message: err.message } }));
     }
@@ -401,6 +518,23 @@ const AgentsSection: React.FC = () => {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+        padding: '12px 16px', borderRadius: 'var(--radius-md)',
+        background: 'var(--surface)', border: '1px solid var(--border-dim)',
+      }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>Auto-approve new agents</div>
+          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>
+            Off: agents ask before running tools, and ORCH shows the request on the card and says it aloud.
+            Each agent can be switched from its card. Folder trust always asks.
+          </div>
+        </div>
+        <Toggle
+          checked={defaultApprovalMode === 'auto'}
+          onChange={(v) => setDefaultApprovalMode(v ? 'auto' : 'manual')}
+        />
+      </div>
       {agentProviders.map((p) => {
         const status = statuses[p.id];
         const isAvailable = status?.available;
@@ -638,8 +772,24 @@ const McpSection: React.FC = () => {
 // ── Audio ─────────────────────────────────────────────────────────
 
 const AudioSection: React.FC = () => {
-  const { audioInputDeviceId, setAudioInputDevice, groqApiKey, setGroqApiKey, enableGroqOnSTTFailure, setGroqOnSTTFailure, instantStart, setInstantStart } = useSettingsStore();
+  const audioInputDeviceId = useSettingsStore((s) => s.audioInputDeviceId);
+  const setAudioInputDevice = useSettingsStore((s) => s.setAudioInputDevice);
+  const groqApiKey = useSettingsStore((s) => s.groqApiKey);
+  const setGroqApiKey = useSettingsStore((s) => s.setGroqApiKey);
+  const enableGroqOnSTTFailure = useSettingsStore((s) => s.enableGroqOnSTTFailure);
+  const setGroqOnSTTFailure = useSettingsStore((s) => s.setGroqOnSTTFailure);
+  const instantStart = useSettingsStore((s) => s.instantStart);
+  const setInstantStart = useSettingsStore((s) => s.setInstantStart);
+  const voiceId = useSettingsStore((s) => s.voiceId);
+  const setVoiceId = useSettingsStore((s) => s.setVoiceId);
+  const voiceSpeed = useSettingsStore((s) => s.voiceSpeed);
+  const setVoiceSpeed = useSettingsStore((s) => s.setVoiceSpeed);
+  const voiceVolume = useSettingsStore((s) => s.voiceVolume);
+  const setVoiceVolume = useSettingsStore((s) => s.setVoiceVolume);
+  const speakLifecycle = useSettingsStore((s) => s.speakLifecycle);
+  const setSpeakLifecycle = useSettingsStore((s) => s.setSpeakLifecycle);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [previewing, setPreviewing] = useState(false);
   const [modelStatus, setModelStatus] = useState<VoiceModelStatus | null>(null);
   const groqKey = groqApiKey || '';
   const enableGroq = enableGroqOnSTTFailure || false;
@@ -648,6 +798,21 @@ const AudioSection: React.FC = () => {
     navigator.mediaDevices?.enumerateDevices().then((all) => {
       setDevices(all.filter((d) => d.kind === 'audioinput'));
     }).catch(() => {});
+  }, []);
+
+  // Push voice settings to the Python sidecar. Without this the controls
+  // would only change local state and the assistant would keep using the
+  // defaults it booted with.
+  useEffect(() => {
+    voiceConfigure(voiceId, voiceSpeed).catch(() => {});
+  }, [voiceId, voiceSpeed]);
+
+  const previewVoice = useCallback(async () => {
+    setPreviewing(true);
+    try {
+      await voiceSpeak('preview', 'Max is spinning up. Sky and Zed are ready.');
+    } catch { /* sidecar not running */ }
+    setTimeout(() => setPreviewing(false), 2500);
   }, []);
 
   // Poll voice model status every 3s
@@ -689,6 +854,85 @@ const AudioSection: React.FC = () => {
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             {devices.length > 0 ? `${devices.length} input device${devices.length !== 1 ? 's' : ''} available` : 'No devices — grant mic access'}
           </span>
+        </div>
+      </div>
+
+      {/* Speech output */}
+      <div>
+        <SectionHeader>Speech</SectionHeader>
+        <div style={{ ...glassCard, display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label htmlFor="voice-id" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Voice</label>
+            <select
+              id="voice-id"
+              value={voiceId}
+              onChange={(e) => setVoiceId(e.target.value)}
+              style={{
+                padding: '8px 10px', borderRadius: 'var(--radius-sm)',
+                background: 'var(--surface)', border: '1px solid var(--border)',
+                color: 'var(--text)', fontSize: 12, fontFamily: 'inherit', outline: 'none',
+              }}
+            >
+              {/* Kokoro's bundled voice set. */}
+              <optgroup label="American English">
+                <option value="af_bella">Bella (warm)</option>
+                <option value="af_nicole">Nicole (soft)</option>
+                <option value="af_sarah">Sarah (neutral)</option>
+                <option value="af_sky">Sky (bright)</option>
+                <option value="am_adam">Adam</option>
+                <option value="am_michael">Michael</option>
+              </optgroup>
+              <optgroup label="British English">
+                <option value="bf_emma">Emma</option>
+                <option value="bf_isabella">Isabella</option>
+                <option value="bm_george">George</option>
+                <option value="bm_lewis">Lewis</option>
+              </optgroup>
+            </select>
+          </div>
+
+          <Slider
+            label="Speech volume"
+            value={Math.round(voiceVolume * 100)}
+            min={0} max={100} step={5}
+            format={(v) => (v === 0 ? 'Muted' : `${v}%`)}
+            onChange={(v) => setVoiceVolume(v / 100)}
+            hint="Applies immediately, including to speech already playing."
+          />
+
+          <Slider
+            label="Speech rate"
+            value={voiceSpeed}
+            min={0.6} max={1.8} step={0.05}
+            format={(v) => `${v.toFixed(2)}×`}
+            onChange={setVoiceSpeed}
+            hint="Applies to the next thing ORCH says."
+          />
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Announce agents by name</div>
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>
+                Say "Max is spinning up" when agents start and stop.
+              </div>
+            </div>
+            <Toggle checked={speakLifecycle} onChange={setSpeakLifecycle} />
+          </div>
+
+          <button
+            onClick={previewVoice}
+            disabled={previewing}
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              padding: '9px 14px', borderRadius: 'var(--radius-sm)',
+              border: '1px solid var(--border)', background: 'var(--glass-bg)',
+              color: 'var(--text)', fontSize: 12, fontFamily: 'inherit',
+              cursor: previewing ? 'default' : 'pointer', opacity: previewing ? 0.6 : 1,
+            }}
+          >
+            <Volume2 size={13} />
+            {previewing ? 'Speaking…' : 'Preview voice'}
+          </button>
         </div>
       </div>
 

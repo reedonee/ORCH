@@ -1,5 +1,18 @@
-const SUPABASE_URL = 'https://gqbfswztfecvbsfeczdc.supabase.co';
-const SERVICE_KEY = 'eyJhbG...EWc0';
+// NOTE: this script is superseded by supabase/migrations/003_feedbacks_rls.sql.
+// It originally created `feedbacks` with no RLS, which — combined with the
+// blanket anon GRANT in 002_grants.sql — left every user's bug reports
+// world-readable and world-deletable. Apply the migrations instead of
+// running this. Kept only for reference.
+//
+// The service-role key must never be committed: it bypasses RLS entirely.
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+
+if (!SUPABASE_URL || !SERVICE_KEY) {
+  console.error('Set SUPABASE_URL and SUPABASE_SERVICE_KEY in the environment.');
+  console.error('Prefer applying supabase/migrations/*.sql instead of this script.');
+  process.exit(1);
+}
 
 async function main() {
   // 1. Create the table via pg-meta query endpoint

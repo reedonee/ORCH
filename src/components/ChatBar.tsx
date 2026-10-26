@@ -1,14 +1,15 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useAppStore } from '../stores/useAppStore';
-import { useTerminalStore } from '../stores/useTerminalStore';
 import { useThemeStore } from '../stores/useThemeStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
-import { useWorkspaceStore } from '../stores/useWorkspaceStore';
 import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
-import { useVoiceInput, type VoiceState } from '../hooks/useVoiceInput';
+import { useVoiceInput } from '../hooks/useVoiceInput';
 import { executeAppCommand, type AppCommand } from '../lib/agent-commands';
 import { listen } from '../lib/electron-api';
-import { parseCommand } from '../lib/voice-parser';
+import {
+  analyzeInput, pushHistory, loadHistory,
+  type Completion, type InputAnalysis,
+} from '../lib/command-bar';
 
 // ── Brand constants ────────────────────────────────────────────
 // These are populated at render time from the active theme.
@@ -30,6 +31,13 @@ const SUGGESTIONS = [
 export const ChatBar: React.FC = () => {
   const [value, setValue] = useState('');
   const [displayIdx, setDisplayIdx] = useState(0);
+  // ── Command bar intelligence ────────────────────────────────
+  const [history, setHistory] = useState<string[]>(() => loadHistory());
+  const [historyIdx, setHistoryIdx] = useState<number | null>(null);
+  const [draft, setDraft] = useState('');            // preserved while browsing history
+  const [completionIdx, setCompletionIdx] = useState(0);
+  const [feedback, setFeedback] = useState<{ text: string; ok: boolean } | null>(null);
+  const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [slideOut, setSlideOut] = useState(false);
   const [isBargeIn, setIsBargeIn] = useState(false);
   const cycleRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -37,8 +45,7 @@ export const ChatBar: React.FC = () => {
   const inputRef = useRef<HTMLInputElement>(null);
   const idxRef = useRef(0);
   const bargeInTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const { agents, selectedAgentId } = useAppStore();
-  const { writeToTerminal } = useTerminalStore();
+  const agents = useAppStore((s) => s.agents);
   const brandColor = useThemeStore((s) => s.theme.colors.brand);
   const infoColor = useThemeStore((s) => s.theme.colors.info);
   // Parse brand hex to RGB for rgba usage
@@ -64,10 +71,8 @@ export const ChatBar: React.FC = () => {
   const {
     voiceState,
     waveform,
-    ready: voiceReady,
     startCapture,
     stopCapture,
-    interrupt: interruptVoice,
   } = useVoiceInput({ onTranscript: handleVoiceTranscript });
 
   // ── Voice state booleans (used by effects + render) ──────────
@@ -217,36 +222,58 @@ export const ChatBar: React.FC = () => {
     }, 4000);
   };
 
+  // ── Live analysis ──────────────────────────────────────────
+  // Runs on every keystroke so the bar can show what it understood
+  // before Enter, rather than silently doing something unexpected.
+  const analysis: InputAnalysis = React.useMemo(
+    () => analyzeInput(value, agents),
+    [value, agents],
+  );
+
+  const showFeedback = useCallback((text: string, ok: boolean) => {
+    setFeedback({ text, ok });
+    if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
+    feedbackTimer.current = setTimeout(() => setFeedback(null), ok ? 2600 : 5000);
+  }, []);
+
+  useEffect(() => () => {
+    if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
+  }, []);
+
+  const acceptCompletion = useCallback((c: Completion) => {
+    // Replace the trailing token with the completion.
+    const parts = value.split(/(\s+)/);
+    let i = parts.length - 1;
+    while (i >= 0 && /^\s+$/.test(parts[i])) i--;
+    if (i >= 0) parts[i] = c.value.trimEnd();
+    const next = parts.join('') + (c.value.endsWith(' ') ? ' ' : '');
+    setValue(next);
+    setCompletionIdx(0);
+    inputRef.current?.focus();
+  }, [value]);
+
   // ── Handle Submit ────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
-    if (!value.trim()) return;
+    const text = value.trim();
+    if (!text) return;
 
-    const command = parseCommand(value.trim());
-    if (command) {
-      const result = await executeAppCommand(command);
-      if (!result.ok) {
-        console.warn('[ChatBar] Command failed:', result.message);
-        if (command.kind === 'spawn' && result.message.startsWith('Provider not found')) {
-          const store = useAppStore.getState();
-          const id = crypto.randomUUID();
-          const name = command.providerId.charAt(0).toUpperCase() + command.providerId.slice(1);
-          const pos = useWorkspaceStore.getState().spawnPosition();
-          await store.addAgent({
-            id, name, role: 'Developer', status: 'idle',
-            provider: command.providerId, x: pos.x,
-            y: pos.y, color: brandColor,
-          });
-        }
-      }
-      setValue('');
+    // An unresolvable @mention is almost always a typo. Running it as a
+    // plain message would silently send it to whatever card happens to be
+    // selected, which is the wrong agent — say so instead.
+    if (analysis.unknownMention) {
+      showFeedback(`No agent called "${analysis.unknownMention}"`, false);
       return;
     }
 
-    const commandMsg: AppCommand = { kind: 'message', text: value };
-    const msgResult = await executeAppCommand(commandMsg);
-    if (!msgResult.ok) console.warn('[ChatBar]', msgResult.message);
-    setValue('');
-  }, [value]);
+    setHistory(pushHistory(text));
+    setHistoryIdx(null);
+
+    const result = await executeAppCommand(analysis.command);
+    // Results used to go to console.warn, so a failed command was
+    // indistinguishable from a successful one: the input just cleared.
+    showFeedback(result.message, result.ok);
+    if (result.ok) setValue('');
+  }, [value, analysis, showFeedback]);
 
   const hasActivity = agents.some(a => a.status === 'busy' || a.status === 'active');
   const showPlaceholder = !value;
@@ -454,10 +481,60 @@ export const ChatBar: React.FC = () => {
           ref={inputRef}
           type="text"
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => { setValue(e.target.value); setCompletionIdx(0); setHistoryIdx(null); }}
           onFocus={handleFocus}
           onBlur={handleBlur}
-          onKeyDown={(e) => { if (e.key === 'Enter') handleSubmit(); }}
+          aria-label="Command and chat input"
+          aria-describedby={analysis.preview ? 'orch-cmd-preview' : undefined}
+          autoComplete="off"
+          spellCheck={false}
+          onKeyDown={(e) => {
+            const comps = analysis.completions;
+
+            // Tab / Enter accept the highlighted completion when the list
+            // is open, so completing never costs a round-trip to the mouse.
+            if (comps.length > 0 && (e.key === 'Tab' || (e.key === 'Enter' && completionIdx > 0))) {
+              e.preventDefault();
+              acceptCompletion(comps[Math.min(completionIdx, comps.length - 1)]);
+              return;
+            }
+            if (comps.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+              e.preventDefault();
+              setCompletionIdx((i) => {
+                const n = comps.length;
+                return e.key === 'ArrowDown' ? (i + 1) % n : (i - 1 + n) % n;
+              });
+              return;
+            }
+
+            if (e.key === 'Enter') { handleSubmit(); return; }
+
+            if (e.key === 'Escape') {
+              if (value) { setValue(''); setHistoryIdx(null); }
+              else inputRef.current?.blur();
+              return;
+            }
+
+            // ── History ──
+            // Only when there is no completion list to navigate.
+            if (e.key === 'ArrowUp') {
+              e.preventDefault();
+              if (history.length === 0) return;
+              const next = historyIdx === null ? history.length - 1 : Math.max(0, historyIdx - 1);
+              if (historyIdx === null) setDraft(value);
+              setHistoryIdx(next);
+              setValue(history[next]);
+              return;
+            }
+            if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              if (historyIdx === null) return;
+              const next = historyIdx + 1;
+              if (next >= history.length) { setHistoryIdx(null); setValue(draft); }
+              else { setHistoryIdx(next); setValue(history[next]); }
+              return;
+            }
+          }}
           style={{
             width: '100%', background: 'transparent', border: 'none', outline: 'none',
             fontFamily: "'JetBrains Mono', 'Cascadia Code', monospace",
@@ -468,6 +545,93 @@ export const ChatBar: React.FC = () => {
           }}
         />
       </div>
+
+      {/* ── Completions ── */}
+      {analysis.completions.length > 0 && value.trim() && (
+        <div
+          role="listbox"
+          aria-label="Suggestions"
+          style={{
+            position: 'absolute', bottom: 'calc(100% + 8px)', left: 0, right: 0,
+            background: 'var(--menu-bg, rgba(14,26,20,0.96))',
+            border: '1px solid var(--border-dim)', borderRadius: 'var(--radius-md)',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.5)', overflow: 'hidden',
+            backdropFilter: 'blur(20px)',
+          }}
+        >
+          {analysis.completions.map((c, i) => (
+            <button
+              key={`${c.kind}-${c.value}`}
+              role="option"
+              aria-selected={i === completionIdx}
+              onMouseDown={(e) => { e.preventDefault(); acceptCompletion(c); }}
+              onMouseEnter={() => setCompletionIdx(i)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+                padding: '7px 12px', border: 'none', textAlign: 'left', cursor: 'pointer',
+                background: i === completionIdx ? `rgba(${brandRGB},0.14)` : 'transparent',
+                color: 'var(--text)', fontFamily: "'JetBrains Mono', monospace", fontSize: 12,
+              }}
+            >
+              <span style={{
+                fontSize: 9, textTransform: 'uppercase', letterSpacing: 0.5, opacity: 0.5,
+                minWidth: 52,
+              }}>
+                {c.kind}
+              </span>
+              <span style={{ fontWeight: 600 }}>{c.label}</span>
+              {c.hint && <span style={{ opacity: 0.45, fontSize: 11 }}>{c.hint}</span>}
+            </button>
+          ))}
+          <div style={{
+            padding: '4px 12px', fontSize: 9, opacity: 0.35,
+            borderTop: '1px solid var(--border-dim)',
+            fontFamily: "'JetBrains Mono', monospace",
+          }}>
+            Tab to complete · ↑↓ to choose
+          </div>
+        </div>
+      )}
+
+      {/* ── Intent preview ── */}
+      {value.trim() && analysis.completions.length === 0 && (
+        <div
+          id="orch-cmd-preview"
+          aria-live="polite"
+          style={{
+            position: 'absolute', bottom: 'calc(100% + 6px)', left: 14,
+            display: 'flex', alignItems: 'center', gap: 6,
+            fontSize: 10.5, fontFamily: "'JetBrains Mono', monospace",
+            color: analysis.unknownMention ? 'var(--error, #E76F51)' : `rgba(${brandRGB},0.85)`,
+            pointerEvents: 'none', whiteSpace: 'nowrap',
+          }}
+        >
+          <span style={{ opacity: 0.6 }}>→</span>
+          {analysis.unknownMention
+            ? `No agent called "${analysis.unknownMention}"`
+            : analysis.preview}
+        </div>
+      )}
+
+      {/* ── Result feedback ── */}
+      {feedback && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'absolute', bottom: 'calc(100% + 6px)', right: 14,
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '4px 10px', borderRadius: 999,
+            background: feedback.ok ? `rgba(${brandRGB},0.16)` : 'rgba(231,111,81,0.18)',
+            border: `1px solid ${feedback.ok ? `rgba(${brandRGB},0.4)` : 'rgba(231,111,81,0.5)'}`,
+            color: feedback.ok ? 'var(--text)' : 'var(--error, #E76F51)',
+            fontSize: 10.5, fontFamily: "'JetBrains Mono', monospace",
+            maxWidth: '60%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}
+        >
+          {feedback.text}
+        </div>
+      )}
     </div>
   );
 };

@@ -3,12 +3,13 @@ import { useSettingsStore } from '../stores/useSettingsStore';
 import { useAppStore } from '../stores/useAppStore';
 import {
   voiceIsReady, voiceSendAudio, voiceStopListening, voiceStartListening,
-  voiceSpeak, voiceSpeakAck, voiceInterrupt, onVoicePartial, onVoiceFinal, onVoiceAudio, onVoiceState, onVoiceError, onVoiceStatus,
+  voiceSpeak, voiceSpeakAck, voiceInterrupt, voiceConfigure, onVoicePartial, onVoiceFinal, onVoiceAudio, onVoiceState, onVoiceError, onVoiceStatus,
 } from '../lib/electron-api';
 import { listen, invoke } from '../lib/electron-api';
 import { parseVoiceCommand } from '../lib/voice-parser';
 import { executeAppCommand } from '../lib/agent-commands';
 import { isTranscriptValid, pcmFramesToWavBlob, transcribeWithGroq } from '../lib/groq-stt';
+import { voicePlayer } from '../lib/voice-audio';
 
 export type VoiceState = 'idle' | 'loading' | 'listening' | 'processing' | 'speaking' | 'error';
 
@@ -95,21 +96,65 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
   // Check if voice server is ready
   useEffect(() => {
     let cancelled = false;
-    const startListening = async () => {
+    const startListening = async (): Promise<boolean> => {
       const ok = await voiceIsReady();
-      if (cancelled) return;
+      if (cancelled) return false;
       setReady(ok);
       if (ok) {
+        // Re-apply the user's saved voice + rate; the sidecar boots with
+        // its own defaults and has no access to renderer settings.
+        const st = useSettingsStore.getState();
+        voiceConfigure(st.voiceId, st.voiceSpeed).catch(() => {});
         try { await voiceStartListening(); } catch (e) {
           console.warn('[Voice] startListening failed:', e);
+          return false;
         }
       }
+      return ok;
     };
-    // Check immediately AND poll every 2s — both must call voiceStartListening()
-    startListening();
-    const id = setInterval(startListening, 2000);
-    return () => { cancelled = true; clearInterval(id); };
+    // Poll only until the sidecar reports ready, then stop. The previous
+    // version polled every 2s for the entire lifetime of the app, re-running
+    // voiceStartListening() (and re-registering main-process callbacks)
+    // forever after the server was already up.
+    let id: ReturnType<typeof setInterval> | null = null;
+    const poll = async () => {
+      const ok = await startListening();
+      if (ok && id) { clearInterval(id); id = null; }
+    };
+    void poll();
+    id = setInterval(poll, 2000);
+    return () => { cancelled = true; if (id) clearInterval(id); };
   }, []);
+
+  // ── Playback volume ────────────────────────────────────────
+  // Applied to the shared scheduler's gain node, so it affects queued
+  // audio immediately rather than only the next utterance.
+  const voiceVolume = useSettingsStore((s) => s.voiceVolume);
+  useEffect(() => { voicePlayer.setVolume(voiceVolume); }, [voiceVolume]);
+
+  // ── Warm the barge-in monitor once, at mount ───────────────
+  // Opening the mic lazily inside speak() meant the first utterance was
+  // already playing before the analyser existed, so the first response of
+  // every session could not be interrupted.
+  useEffect(() => { void startBargeMonitor(); }, [startBargeMonitor]);
+
+  // ── Speak via local TTS ────────────────────────────
+  // Declared above the listener effect that calls it. It used to be
+  // defined ~280 lines further down, so the effect (with [] deps)
+  // captured it before initialisation — legal only because effects run
+  // after the component body, and a stale-closure trap either way.
+  const speak = useCallback(async (text: string) => {
+    if (!text.trim()) { setVoiceState('idle'); return; }
+    setVoiceState('speaking');
+    void startBargeMonitor();
+    try {
+      // Route through the local voice sidecar — Kokoro TTS via IPC
+      await voiceSpeak('feedback', text);
+    } catch (err) {
+      console.warn('[Voice] TTS speak failed:', err);
+      setVoiceState('idle');
+    }
+  }, [startBargeMonitor]);
 
   // ── Listen for voice events from main process ──────────────
   useEffect(() => {
@@ -171,35 +216,11 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
       speak(feedback);
     }));
 
-    unsubs.push(onVoiceAudio(({ data }) => {
-      // Play raw f32 PCM from Kokoro (no WAV header — use createBuffer directly)
-      if (!data) return;
-      try {
-        const binary = atob(data);
-        const pcm = new Float32Array(binary.length / 4);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        const view = new DataView(bytes.buffer);
-        for (let i = 0; i < pcm.length; i++) pcm[i] = view.getFloat32(i * 4, true); // little-endian f32
-
-        const audioCtx = new AudioContext();
-        const buffer = audioCtx.createBuffer(1, pcm.length, 24000); // Kokoro outputs at 24kHz
-        buffer.getChannelData(0).set(pcm);
-
-        const source = audioCtx.createBufferSource();
-        source.buffer = buffer;
-        source.connect(audioCtx.destination);
-        source.start(0);
-        setVoiceState('speaking');
-        source.onended = () => {
-          audioCtx.close();
-          setVoiceState('idle');
-        };
-      } catch (err) {
-        console.error('[Voice] Audio playback error:', err);
-        setVoiceState('idle');
-      }
-    }));
+    // Streamed TTS spans go to the shared scheduler, which plays them
+    // gaplessly in order. The player owns the speaking → idle transition
+    // because only it knows when the queue has actually drained.
+    voicePlayer.onStateChange = (s) => setVoiceState(s === 'speaking' ? 'speaking' : 'idle');
+    unsubs.push(onVoiceAudio((chunk) => voicePlayer.enqueue(chunk)));
 
     unsubs.push(onVoiceState((state) => {
       setVoiceState(state as VoiceState);
@@ -263,11 +284,11 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
       analyser.fftSize = 256;
       source.connect(analyser);
       analyserRef.current = analyser;
-      const tap = audioCtx.createGain();
-      tap.gain.value = 0.005;
-      analyser.connect(tap);
-      tap.connect(audioCtx.destination);
-      warmTapRef.current = tap;
+      // NOTE: the analyser is deliberately NOT routed to destination.
+      // An earlier version connected it through a 0.005-gain node to keep
+      // the graph "pumping", which fed the microphone back into the
+      // speakers — an acoustic feedback path, and one that also let TTS
+      // output re-enter the capture path during barge-in.
 
       const bufferLen = analyser.frequencyBinCount;
 
@@ -352,7 +373,6 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
 
       // Batch PCM chunks to reduce IPC overhead — send every ~50ms
       let pcmBuffer: number[] = [];
-      let batchTimer: ReturnType<typeof setInterval> | null = null;
 
       workletNode.port.onmessage = (e: MessageEvent) => {
         const pcm = e.data as Float32Array;
@@ -366,13 +386,16 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
             if (pcmBuffer.length === 0) return;
             const combined = new Float32Array(pcmBuffer);
             pcmBuffer = [];
-            // Efficient base64: use native btoa on a typed array approach
+            // Chunked base64 to avoid a stack overflow on large arrays.
+            // The chunk size MUST be a multiple of 3: base64 encodes 3 bytes
+            // to 4 chars, so a non-multiple makes btoa() pad each chunk with
+            // '=' and btoa(a)+btoa(b) !== btoa(a+b) — the decoder then gets a
+            // corrupt stream. 8192 is not a multiple of 3; 8190 is.
             const view = new Uint8Array(combined.buffer);
-            // Use chunked binary string to avoid stack overflow on large arrays
             let b64 = '';
-            const chunkSize = 8192;
-            for (let i = 0; i < view.length; i += chunkSize) {
-              const end = Math.min(i + chunkSize, view.length);
+            const CHUNK_BYTES = 8190;
+            for (let i = 0; i < view.length; i += CHUNK_BYTES) {
+              const end = Math.min(i + CHUNK_BYTES, view.length);
               let binary = '';
               for (let j = i; j < end; j++) binary += String.fromCharCode(view[j]);
               b64 += btoa(binary);
@@ -465,20 +488,6 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
     }
     setWaveform([]);
   }, []);
-  // ── Speak via local TTS ────────────────────────────
-  const speak = useCallback(async (text: string) => {
-    if (!text.trim()) { setVoiceState('idle'); return; }
-    setVoiceState('speaking');
-    startBargeMonitor();
-    try {
-      // Route through the local voice sidecar — Kokoro TTS via IPC
-      await voiceSpeak('feedback', text);
-    } catch (err) {
-      console.warn('[Voice] TTS speak failed:', err);
-      setVoiceState('idle');
-    }
-  }, [startBargeMonitor]);
-
   // ── Slot 1 ack: cached instant TTS ─────────────────────────
   const playAck = useCallback((phrase?: string) => {
     voiceSpeakAck('ack', phrase);
@@ -486,6 +495,9 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
 
   // ── Interrupt ───────────────────────────────────────────────
   const interrupt = useCallback(async () => {
+    // Stop local playback first — the user should hear silence immediately,
+    // not after the IPC round-trip to the sidecar completes.
+    voicePlayer.interrupt();
     await voiceInterrupt();
     setVoiceState('idle');
   }, []);
@@ -504,19 +516,27 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
   }, [voiceState]);
 
   // ── Barge-in: detect user speech during TTS ─────────────────
+  // The monitor's analyser is created asynchronously by startBargeMonitor
+  // (it awaits getUserMedia). The previous version bailed out of this
+  // effect when the analyser was still null and only re-ran on the next
+  // voiceState change — by which time the utterance was usually over, so
+  // barge-in never fired on first use. The loop now runs unconditionally
+  // and reads the ref each frame, picking the analyser up the moment it
+  // exists.
   useEffect(() => {
     let rafId = 0;
-    const b = bargeInRef.current;
-    if (!b.analyser) return;
 
     const check = () => {
-      if (voiceState !== 'speaking') {
+      const b = bargeInRef.current;
+      const analyser = b.analyser;
+      // Only listen for interruptions while audio is actually playing.
+      if (!analyser || !voicePlayer.isSpeaking) {
         b.consecutiveSpeech = 0;
         rafId = requestAnimationFrame(check);
         return;
       }
-      const data = new Uint8Array(b.analyser!.frequencyBinCount);
-      b.analyser!.getByteTimeDomainData(data);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteTimeDomainData(data);
       let sumSq = 0;
       for (let i = 0; i < data.length; i++) {
         const v = (data[i] - 128) / 128;
@@ -540,7 +560,7 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
     };
     rafId = requestAnimationFrame(check);
     return () => cancelAnimationFrame(rafId);
-  }, [voiceState, interrupt, startCapture]);
+  }, [interrupt, startCapture]);
 
   // ── Cleanup ─────────────────────────────────────────────────
   useEffect(() => {
@@ -548,6 +568,7 @@ export function useVoiceInput({ onTranscript }: UseVoiceInputOptions) {
       if (audioCtxRef.current) audioCtxRef.current.close();
       if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
       stopBargeMonitor();
+      voicePlayer.dispose();
     };
   }, [stopBargeMonitor]);
 

@@ -31,6 +31,43 @@ for (const [provider, aliases] of Object.entries(PROVIDER_ALIASES)) {
 }
 ALIAS_TO_PROVIDER.sort((a, b) => b[0].length - a[0].length);
 
+// ── Layout mode vocabulary ─────────────────────────────────
+// Voice transcripts are noisy and users don't know the engine's internal
+// names, so every mode carries a generous set of natural synonyms.
+
+const LAYOUT_MODE_ALIASES: Record<string, string[]> = {
+  grid: ['grid', 'tidy', 'neaten', 'clean', 'organize', 'organise', 'straighten',
+         'matrix', 'snap', 'align', 'normal', 'default', 'even', 'equal', 'tiles', 'tile'],
+  focus: ['focus', 'focused', 'spotlight', 'hero', 'zoom', 'main', 'primary',
+          'big', 'large', 'one big', 'presentation', 'present'],
+  stage: ['stage', 'theater', 'theatre', 'cinema', 'cinematic', 'browser', 'preview'],
+  split: ['split', 'half', 'halves', 'side by side', 'side-by-side', 'two columns',
+          'columns', 'compare', 'comparison', 'dual'],
+  rail: ['rail', 'strip', 'row', 'filmstrip', 'film strip', 'line', 'horizontal', 'across'],
+  constellation: ['constellation', 'cluster', 'clusters', 'clustered', 'graph',
+                  'relationship', 'relationships', 'related', 'groups', 'grouped', 'smart'],
+};
+
+const LAYOUT_ALIAS_PAIRS: [string, string][] = [];
+for (const [mode, aliases] of Object.entries(LAYOUT_MODE_ALIASES)) {
+  for (const alias of aliases) LAYOUT_ALIAS_PAIRS.push([alias, mode]);
+}
+// Longest first so "side by side" wins over "side".
+LAYOUT_ALIAS_PAIRS.sort((a, b) => b[0].length - a[0].length);
+
+/** Resolve a spoken fragment to a layout mode, or null when unrecognised. */
+export function matchLayoutMode(text?: string | null): string | null {
+  if (!text) return null;
+  const t = text.trim().toLowerCase().replace(/[.!?,]+$/, '');
+  if (!t) return null;
+  for (const [alias, mode] of LAYOUT_ALIAS_PAIRS) {
+    // Word-boundary match so "grid" doesn't fire inside "gridiron".
+    const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`(^|\\s)${escaped}($|\\s)`).test(t)) return mode;
+  }
+  return null;
+}
+
 // ── Intent definitions ─────────────────────────────────────
 
 interface IntentPattern {
@@ -41,7 +78,87 @@ interface IntentPattern {
   keywords: string[]; // for keyword scoring
 }
 
+/** "approve max" → "max"; "approve it" / "approve" → undefined, meaning
+ *  whichever agent is waiting. */
+function approvalTarget(raw: string | undefined): string | undefined {
+  const q = (raw ?? '')
+    .replace(/^(?:it|that|this|the request|the command|for|please)\b\s*/i, '')
+    .replace(/\s*\b(?:please|request|now)$/i, '')
+    .trim();
+  return q || undefined;
+}
+
 const INTENTS: IntentPattern[] = [
+  // ── APPROVE / DENY a waiting agent ─────────────────────
+  // Above spawn and focus: "allow max" or "let sky go ahead" must never
+  // start an agent or move focus while another is blocked on a prompt.
+  {
+    kind: 'approval',
+    priority: 14,
+    keywords: ['approve', 'allow', 'accept', 'deny', 'reject', 'decline', 'refuse', 'go ahead'],
+    patterns: [
+      /^(approve|allow|accept|deny|reject|decline|refuse)\b\s*(.*)$/i,
+      /^(?:let|tell)\s+(.+?)\s+(go ahead|proceed|do it)$/i,
+      // Deliberately no bare "yes"/"no": those are ordinary replies an
+      // agent may be waiting for in chat, and must still reach it.
+    ],
+    extract: (m) => {
+      const verb = m[0].toLowerCase();
+      const deny = /^(deny|reject|decline|refuse)\b/.test(verb);
+      // Pattern 2 captures the agent first; the others capture it second.
+      const raw = /^(let|tell)\s/.test(verb) ? m[1] : m[2];
+      const target = approvalTarget(raw);
+      const all = !!target && /^(all|everyone|everything|every agent|all agents|them all)$/i.test(target);
+      return {
+        kind: 'approval', decision: deny ? 'deny' : 'approve',
+        query: all ? undefined : target, all,
+      } as AppCommand & { kind: 'approval' };
+    },
+  },
+
+  // ── AUTO / MANUAL approval mode ────────────────────────
+  {
+    kind: 'approvalMode',
+    priority: 14,
+    keywords: ['auto approve', 'auto mode', 'manual', 'auto'],
+    patterns: [
+      // (?!on|off …): "turn off auto approve" belongs to the last pattern.
+      /^(?:put|set|switch|turn|make)\s+(?!(?:on|off)\s+auto)(.+?)\s+(?:to|on|in|into)?\s*(auto|manual)(?:\s+(?:mode|approval|approve))?$/i,
+      /^(auto|manual)\s+(?:approv\w*|mode)\s+(?:for|on)\s+(.+)$/i,
+      /^turn\s+(on|off)\s+auto[- ]?approv\w*(?:\s+for\s+(.+))?$/i,
+    ],
+    extract: (m) => {
+      const text = m[0].toLowerCase();
+      if (text.startsWith('turn on') || text.startsWith('turn off')) {
+        return { kind: 'approvalMode', mode: m[1].toLowerCase() === 'on' ? 'auto' : 'manual', query: approvalTarget(m[2]) } as AppCommand & { kind: 'approvalMode' };
+      }
+      if (/^(auto|manual)\s/.test(text)) {
+        return { kind: 'approvalMode', mode: m[1].toLowerCase() as 'auto' | 'manual', query: approvalTarget(m[2]) } as AppCommand & { kind: 'approvalMode' };
+      }
+      return { kind: 'approvalMode', mode: m[2].toLowerCase() as 'auto' | 'manual', query: approvalTarget(m[1]) } as AppCommand & { kind: 'approvalMode' };
+    },
+  },
+
+  // ── CONTROLLER ─────────────────────────────────────────
+  // Above spawn: "make max the controller" must not start an agent.
+  {
+    kind: 'controller',
+    priority: 14,
+    keywords: ['controller', 'coordinator', 'coordinate', 'take charge', 'run the show'],
+    patterns: [
+      /^(?:clear|remove|stop|drop|no|unset)\s+(?:the\s+)?(?:controller|coordinator)$/i,
+      /^(?:make|set|put)\s+(.+?)\s+(?:as\s+)?(?:the\s+)?(?:controller|coordinator|lead|leader)$/i,
+      /^(?:set|change|switch)\s+(?:the\s+)?(?:controller|coordinator)\s+to\s+(.+)$/i,
+      /^(?:let|have)\s+(.+?)\s+(?:coordinate|run the show|lead|take charge)(?:\s+of\s+the\s+others)?$/i,
+    ],
+    extract: (m) => {
+      if (/^(clear|remove|stop|drop|no|unset)\b/i.test(m[0])) {
+        return { kind: 'controller', clear: true } as AppCommand & { kind: 'controller' };
+      }
+      return { kind: 'controller', query: m[1].trim() } as AppCommand & { kind: 'controller' };
+    },
+  },
+
   // ── SPAWN ──────────────────────────────────────────────
   {
     kind: 'spawn',
@@ -58,7 +175,7 @@ const INTENTS: IntentPattern[] = [
       const provider = extractProvider(after);
       if (provider) {
         const countMatch = after.match(/^(\d+)\s+/);
-        const count = countMatch ? Math.min(Math.max(parseInt(countMatch[1]), 1), 4) : 1;
+        const count = countMatch ? Math.max(parseInt(countMatch[1]), 1) : 1;
         return { kind: 'spawn', providerId: provider, count } as AppCommand & { kind: 'spawn' };
       }
       // Check if it's a name + provider pattern like "Max as Claude"
@@ -87,7 +204,7 @@ const INTENTS: IntentPattern[] = [
       /^(\d+)\s*(?:of\s+)?(.+?)\s*(?:agents?|terminals?)?$/i,
     ],
     extract: (m) => {
-      const count = Math.min(Math.max(parseInt(m[1]), 1), 4);
+      const count = Math.max(parseInt(m[1]), 1);
       const after = m[2].trim();
       const provider = extractProvider(after);
       if (provider) {
@@ -119,10 +236,13 @@ const INTENTS: IntentPattern[] = [
   {
     kind: 'removeAll',
     priority: 15,
-    keywords: ['remove all', 'kill all', 'close all', 'delete all', 'clear all', 'clean up', 'reset'],
+    keywords: ['remove all', 'kill all', 'close all', 'delete all', 'clear all', 'reset'],
     patterns: [
       /^(?:remove|close|kill|delete|clear|vanish|destroy)\s+(?:all|everyone|everything|every\s+agent)/i,
-      /^(?:clean up|clear all|reset all|start fresh)\s*/i,
+      /^(?:clear all|reset all|start fresh)\s*$/i,
+      // "clean up" on its own means tidy, not destroy — it must name the
+      // agents explicitly before it is treated as a destructive command.
+      /^clean\s+up\s+(?:all\s+)?(?:the\s+)?agents?\s*$/i,
     ],
     extract: () => ({ kind: 'removeAll' } as AppCommand & { kind: 'removeAll' }),
   },
@@ -131,23 +251,25 @@ const INTENTS: IntentPattern[] = [
   {
     kind: 'arrange',
     priority: 8,
-    keywords: ['arrange', 'organize', 'layout', 'sort', 'tidy', 'grid', 'clean', 'neaten', 'stage', 'align', 'snap', 'spread'],
+    keywords: [
+      'arrange', 'organize', 'organise', 'layout', 'sort', 'tidy', 'grid', 'clean',
+      'neaten', 'stage', 'align', 'snap', 'spread', 'focus', 'split', 'rail',
+      'constellation', 'cluster', 'strip', 'row',
+    ],
     patterns: [
-      /^(?:arrange|organize|layout|sort|tidy|grid|clean|neaten|stage|align|snap|spread|rearrange)\s*(.+)?$/i,
+      /^(?:arrange|organize|organise|layout|sort|tidy|grid|clean|neaten|stage|align|snap|spread|rearrange|re-?arrange)\s*(?:the\s+)?(?:agents?|nodes?|cards?|windows?|canvas|everything|them|all)?\s*(?:in(?:to)?|as|to|by|using)?\s*(?:an?\s+)?(.+)?$/i,
+      /^(?:put|place|lay|line|group|cluster|stack)\s+(?:them|everything|it|the\s+\w+)?\s*(?:up|out)?\s*(?:in(?:to)?|as|by|side)?\s*(?:an?|the)?\s*(.+)$/i,
+      /^(.+?)\s+(?:layout|view|mode)$/i,
+      // Bare mode phrases: "two columns", "side by side", "constellation".
+      /^(two columns|side by side|side-by-side|filmstrip|constellation|spotlight|split|rail)$/i,
     ],
     extract: (m) => {
-      const modeWord = m[1]?.trim().toLowerCase();
-      if (!modeWord) return { kind: 'arrange' } as AppCommand & { kind: 'arrange' };
-      if (/^tidy|neaten|clean|straighten|organize$/.test(modeWord)) {
-        return { kind: 'arrange', mode: 'tidy' } as AppCommand & { kind: 'arrange' };
-      }
-      if (/^grid|matrix|snap|align$/.test(modeWord)) {
-        return { kind: 'arrange', mode: 'grid' } as AppCommand & { kind: 'arrange' };
-      }
-      if (/^stage|theater|cinema|cinematic|focus|spotlight|present$/.test(modeWord)) {
-        return { kind: 'arrange', mode: 'stage' } as AppCommand & { kind: 'arrange' };
-      }
-      return { kind: 'arrange' } as AppCommand & { kind: 'arrange' };
+      // Try the captured fragment first, then the whole utterance. The
+      // mode word often IS the verb ("tidy up", "grid layout", "stage
+      // view"), in which case the capture group holds only the leftover
+      // filler and matching it alone yields nothing.
+      const mode = matchLayoutMode(m[1]) ?? matchLayoutMode(m[0]);
+      return { kind: 'arrange', mode: mode ?? undefined } as AppCommand & { kind: 'arrange' };
     },
   },
 
@@ -186,13 +308,17 @@ const INTENTS: IntentPattern[] = [
   // ── BROWSER ─────────────────────────────────────────────
   {
     kind: 'browser',
-    priority: 5,
+    // Above spawn (10): these patterns all name the browser explicitly, so
+    // they are strictly more specific than spawn's generic "open <thing>".
+    // At priority 5 "open a browser" lost to spawn and created an agent.
+    priority: 12,
     keywords: ['browser', 'web', 'internet', 'website', 'url', 'page'],
     patterns: [
-      /^(?:open|launch|show)\s+(?:browser|browser preview|web preview|web browser)/i,
-      /^(?:open|launch|show)\s+(?:browser|browser preview|web preview)\s+(?:navigate to|go to|open|load)\s+(.+)/i,
-      /^(?:navigate to|go to|open|load)\s+(https?:\/\/\S+)/i,
-      /^(?:close)\s+(?:browser|browser preview|web browser)/i,
+      /^(?:open|launch|show|bring up)\s+(?:up\s+)?(?:a|an|the)?\s*(?:web\s+)?(?:browser|browser preview|web preview)\b/i,
+      /^(?:open|launch|show)\s+(?:a|an|the)?\s*(?:browser|browser preview|web preview)\s+(?:and\s+)?(?:navigate to|go to|open|load)\s+(.+)/i,
+      /^(?:navigate to|go to|open|load|browse to)\s+(https?:\/\/\S+)/i,
+      /^(?:navigate to|go to|browse to)\s+([\w-]+\.[a-z]{2,}\S*)/i,
+      /^(?:close|hide|dismiss)\s+(?:the\s+)?(?:browser|browser preview|web browser)\b/i,
     ],
     extract: (m) => {
       const text = m[0].toLowerCase();
@@ -207,11 +333,14 @@ const INTENTS: IntentPattern[] = [
   // ── MUSIC ───────────────────────────────────────────────
   {
     kind: 'music',
-    priority: 5,
+    // Same reasoning as browser: every pattern names music explicitly.
+    priority: 12,
     keywords: ['music', 'play', 'song', 'track', 'youtube', 'audio', 'sound'],
     patterns: [
       /^play\s+(https?:\/\/\S+)/i,
-      /^play\s+music/i,
+      // Allow the filler people actually say: "play some music",
+      // "put on a bit of music", "start the music".
+      /^(?:play|put on|start|resume)\s*(?:some|a bit of|a little)?\s*(?:the\s+)?music\b/i,
       /^(?:play|resume)\s*(?:music|the music)?$/i,
       /^(?:pause|stop)\s*(?:music|the music)?$/i,
       /^(?:next|skip)\s*(?:track|song)?$/i,

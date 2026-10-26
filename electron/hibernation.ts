@@ -18,7 +18,6 @@ export interface PtySession {
   shellArgs: string[];
   shellEnv: Record<string, string> | undefined;
   providerId: string;
-  mcpConfigDir: string | null;
   // Delegation / memory tracking
   delegationDepth: number;    // how deep in the delegation tree
   contextSnapshot: string;    // JSON: shell path, env config, relevant artifact IDs
@@ -31,9 +30,21 @@ export interface SessionStats {
   sessions: Array<{ id: string; agentId: string; name: string; status: string; idleSeconds: number }>;
 }
 
-const IDLE_TIMEOUT_MS = 180_000;   // hibernate after 3min idle
-const MAX_ACTIVE = 3;               // max concurrent PTY processes
-const CHECK_INTERVAL_MS = 10_000;   // check every 10s
+// ── Tuning ──────────────────────────────────────────────────────
+//
+// IMPORTANT: "hibernation" here means KILLING the process and later
+// spawning a fresh shell. For a CLI coding agent that is termination,
+// not suspension: the conversation, the working directory and any
+// in-flight task are gone and cannot be recovered by wake().
+//
+// That makes an aggressive default actively destructive, which is why
+// this is opt-in (Settings) and why the idle window is long. Treat these
+// numbers as "reclaim resources from something the user has clearly
+// abandoned", not "manage a working set".
+const IDLE_TIMEOUT_MS = 30 * 60_000;  // 30 min idle before reclaiming
+const MAX_ACTIVE = 12;                // concurrent PTY processes before eviction
+const CHECK_INTERVAL_MS = 30_000;     // check every 30s
+const REPLAY_MAX_CHARS = 200_000;     // scrollback replayed into the view on wake
 
 export class HibernationManager {
   private sessions: Map<string, PtySession>;
@@ -52,7 +63,7 @@ export class HibernationManager {
   start(): void {
     if (this.interval) return;
     this.interval = setInterval(() => this.checkIdleSessions(), CHECK_INTERVAL_MS);
-    console.log('[Hibernation] Manager started (60s idle timeout, max 3 active)');
+    console.log(`[Hibernation] Manager started (${IDLE_TIMEOUT_MS / 60_000}min idle timeout, max ${MAX_ACTIVE} active)`);
   }
 
   stop(): void {
@@ -76,7 +87,7 @@ export class HibernationManager {
     if (active < MAX_ACTIVE) return true;
 
     // Hibernate the oldest-active session
-    const oldest = this.findOldestActive();
+    const oldest = this.findLeastRecentlyUsed();
     if (oldest) {
       this.hibernate(oldest);
       return true;
@@ -147,16 +158,20 @@ export class HibernationManager {
         onExit(exitCode, signal);
       });
 
-      // Replay saved buffer so xterm shows history
+      // Surface the scrollback the user had before the process was killed.
+      //
+      // The previous implementation read session.buffer into `savedOutput`
+      // and then never used it — it wrote a bare '\r\n' into the PTY,
+      // which replays nothing and instead sends a stray keystroke to the
+      // freshly spawned shell. Replay belongs on the *display* path:
+      // writing history into the PTY would execute it.
       const savedOutput = session.buffer.join('');
       if (savedOutput) {
-        // Small delay to let xterm initialize
-        setTimeout(() => {
-          if (session.pty) {
-            // Write a marker then the replay
-            session.pty.write('\r\n');
-          }
-        }, 100);
+        onData(
+          '\r\n\x1b[2m── previous output (process was stopped; this is a new shell) ──\x1b[0m\r\n' +
+          savedOutput.slice(-REPLAY_MAX_CHARS) +
+          '\r\n\x1b[2m── end of replay ──\x1b[0m\r\n',
+        );
       }
 
       this.onWake(sessionId, session.agentId);
@@ -208,17 +223,23 @@ export class HibernationManager {
     return count;
   }
 
-  /** Find the oldest active session. */
-  private findOldestActive(): string | null {
-    let oldestId: string | null = null;
-    let oldestTime = Infinity;
+  /** Find the least-recently-used active session.
+   *
+   *  Previously this picked the oldest-CREATED session, so the first agent
+   *  you spawned was the first one killed — even if it was the one you
+   *  were actively working in. Evicting by last activity is what the name
+   *  "idle" implies and what the user expects. */
+  private findLeastRecentlyUsed(): string | null {
+    let lruId: string | null = null;
+    let lruTime = Infinity;
     for (const [id, s] of this.sessions) {
-      if (!s.hibernating && s.createdAt < oldestTime) {
-        oldestTime = s.createdAt;
-        oldestId = id;
+      if (s.hibernating || !s.pty) continue;
+      if (s.lastActivity < lruTime) {
+        lruTime = s.lastActivity;
+        lruId = id;
       }
     }
-    return oldestId;
+    return lruId;
   }
 
   /** Auto-hibernate sessions that have been idle too long. */

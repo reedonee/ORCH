@@ -3,18 +3,29 @@ import { GlassPanel } from './GlassPanel';
 import { CliTerminal } from './CliTerminal';
 import { useAppStore, type Agent } from '../stores/useAppStore';
 import { usePanelRegistry } from '../stores/usePanelRegistry';
+import { withAlpha } from '../lib/color';
+import { AgentCardBack } from './AgentCardBack';
 import { useThemeStore } from '../stores/useThemeStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { usePanelDrag } from '../hooks/usePanelDrag';
 import { computePanelZIndex } from '../lib/z-stack-manager';
 import { BUILTIN_PROVIDERS } from '../types/settings';
-import { X, Minus, Maximize2, RefreshCw, Moon } from 'lucide-react';
+import { X, Minus, Maximize2, RefreshCw, Moon, ShieldAlert, ShieldCheck, Shield, Crown } from 'lucide-react';
+import { useApprovalStore } from '../stores/useApprovalStore';
+
+/** Providers whose permission prompts ORCH recognises (mirrors
+ *  APPROVAL_PROVIDERS in electron/agent-approvals.ts). */
+const APPROVAL_PROVIDERS = ['claude-code', 'codex'];
+/** Providers ORCH points at its MCP server (mcp-agent-config.ts). */
+const MCP_PROVIDERS = ['claude-code', 'codex', 'hermes', 'opencode'];
 import { wakeAgent } from '../lib/electron-api';
 import { PROVIDER_ICONS } from './icons/ProviderIcon';
 
-const MIN_W = 260;
-const MIN_H = 180;
+/** Shared empty array so "no conflicts" keeps a stable identity and
+ *  cannot itself trigger a re-render. */
+const EMPTY_CONFLICTS: string[] = [];
+
 const DEFAULT_W = 520;
 const DEFAULT_H = 360;
 
@@ -26,13 +37,52 @@ interface AgentCardProps {
 
 // memo() prevents re-render when pan/zoom changes the `agent` reference in store
 export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose }) => {
-  const updateAgentPosition = useAppStore((s) => s.updateAgentPosition);
-  const updateAgentSize = useAppStore((s) => s.updateAgentSize);
   const selectedAgentId = useAppStore((s) => s.selectedAgentId);
   const setSelectedAgent = useAppStore((s) => s.setSelectedAgent);
   const brandColor = useThemeStore((s) => s.theme.colors.brand);
   const themeColors = useThemeStore((s) => s.theme.colors);
+  const cardOpacity = useSettingsStore((s) => s.cardOpacity);
+  const cardBlur = useSettingsStore((s) => s.cardBlur);
+  const reduceMotion = useSettingsStore((s) => s.reduceMotion);
+  const flipView = useAppStore((s) => s.flipView);
+  const report = useAppStore((s) => s.agentReports[agent.id]);
+  // NOT `useAppStore((s) => s.fileConflictsFor(agent.id))`: that selector
+  // builds a NEW array on every call, so zustand sees a changed reference
+  // on every store update and re-renders forever ("Maximum update depth
+  // exceeded"). Subscribe to the stable reports object and derive.
+  const agentReports = useAppStore((s) => s.agentReports);
+  const conflicts = React.useMemo(() => {
+    const mine = agentReports[agent.id];
+    if (!mine || mine.phase !== 'working') return EMPTY_CONFLICTS;
+    // Normalise separators so Windows and POSIX spellings of one path match.
+    const norm = (f: string) => f.replace(/\\/g, '/').toLowerCase();
+    const theirs = new Set(
+      Object.values(agentReports)
+        .filter((r) => r.agentId !== agent.id && r.phase === 'working')
+        .flatMap((r) => r.files.map(norm)),
+    );
+    const hits = mine.files.filter((f) => theirs.has(norm(f)));
+    return hits.length ? hits : EMPTY_CONFLICTS;
+  }, [agentReports, agent.id]);
   const createTerminal = useTerminalStore((s) => s.createTerminal);
+
+  // ── Approvals ───────────────────────────────────────────────
+  const approval = useApprovalStore((s) => s.pending[agent.id]);
+  const ownMode = useApprovalStore((s) => s.modes[agent.id]);
+  const defaultApprovalMode = useSettingsStore((s) => s.defaultApprovalMode);
+  const approvalMode = ownMode ?? defaultApprovalMode;
+  const supportsApproval = APPROVAL_PROVIDERS.includes(agent.provider || '');
+  const [answering, setAnswering] = useState(false);
+
+  // ── MCP connection and controller ───────────────────────────
+  const mcp = useAppStore((s) => s.mcpConnections[agent.id]);
+  const isController = useAppStore((s) => s.controllerAgentId === agent.id);
+  const usesMcp = MCP_PROVIDERS.includes(agent.provider || '');
+  const respond = useCallback(async (decision: 'approve' | 'deny') => {
+    setAnswering(true);
+    await useApprovalStore.getState().respond(agent.id, decision);
+    setAnswering(false);
+  }, [agent.id]);
 
   const [minimized, setMinimized] = useState(false);
 
@@ -64,17 +114,24 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
   });
 
   // ── Compute z-index from central stack manager ─────────────
-  const registry = usePanelRegistry();
+  // Narrow selectors, not the whole store. Subscribing to the entire
+  // registry meant every agent card re-rendered whenever ANY panel moved,
+  // resized, or was registered — so dragging one card re-rendered all of
+  // them, and each of those carries a live xterm instance.
+  const activePanelId = usePanelRegistry((s) => s.activePanelId);
+  const dragPanelId = usePanelRegistry((s) => s.dragPanelId);
+  const resizePanelId = usePanelRegistry((s) => s.resizePanelId);
+  const zStack = usePanelRegistry((s) => s.zStack);
   const focusPanel = usePanelRegistry((s) => s.focusPanel);
   const zIndex = computePanelZIndex(
     agent.id,
     'canvas',
     10,                          // baseZIndex for unselected agents
     true,                        // focusable
-    registry.activePanelId,
-    registry.dragPanelId,
-    registry.resizePanelId,
-    registry.zStack,
+    activePanelId,
+    dragPanelId,
+    resizePanelId,
+    zStack,
   );
 
   // ── restart claude-code session with --continue ────────────────────────────
@@ -90,9 +147,9 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
         env[varName] = key.key;
       }
     }
-    const resumeArgs = ['--dangerously-skip-permissions', '--continue'];
+    const resumeArgs = ['--continue'];
     const termId = await createTerminal(
-      agent.name, `${agent.name} Terminal`,
+      agent.id, agent.name,
       prov.command, resumeArgs,
       Object.keys(env).length > 0 ? env : undefined,
       'cli', 'claude-code',
@@ -115,7 +172,7 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
     }
     const resumeArgs = ['--continue'];
     const termId = await createTerminal(
-      agent.name, `${agent.name} Terminal`,
+      agent.id, agent.name,
       prov.command, resumeArgs,
       Object.keys(env).length > 0 ? env : undefined,
       'cli', 'hermes',
@@ -126,7 +183,8 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
   }, [agent, createTerminal]);
 
   const displayW = minimized ? 240 : (positionStyle.width as number || DEFAULT_W);
-  const displayH = minimized ? 48 : (positionStyle.height as number || DEFAULT_H);
+  // A minimised card still shows its approval banner (~46px tall).
+  const displayH = minimized ? (approval ? 94 : 48) : (positionStyle.height as number || DEFAULT_H);
 
   return (
     <div
@@ -144,8 +202,29 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
         cursor: isDragging ? 'grabbing' : isResizing ? 'nwse-resize' : 'default',
       }}
     >
+      {/* 3D flip container. The back face is always mounted so the
+          terminal underneath is never unmounted by a flip — remounting
+          xterm would drop scrollback and reset the shell's view. */}
+      <div
+        style={{
+          width: '100%', height: '100%', position: 'relative',
+          transformStyle: 'preserve-3d',
+          transform: flipView ? 'rotateY(180deg)' : 'rotateY(0deg)',
+          transition: reduceMotion ? 'none' : 'transform 520ms cubic-bezier(0.22, 1, 0.36, 1)',
+        }}
+      >
       <GlassPanel
         accent={agent.id === selectedAgentId}
+        // Selecting only from the header was the bug: you click INTO a
+        // terminal to type, which is the strongest possible signal that
+        // this is the agent you mean — but selection never moved, so the
+        // chat bar kept sending prompts to whatever card you last touched
+        // by its title bar. Capture phase so it still fires when xterm
+        // stops the event from bubbling.
+        onMouseDownCapture={() => {
+          if (selectedAgentId !== agent.id) setSelectedAgent(agent.id);
+          focusPanel(agent.id);
+        }}
         style={{
           width: '100%',
           height: '100%',
@@ -153,10 +232,23 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
           flexDirection: 'column',
           overflow: 'hidden',
           borderRadius: 'var(--radius-lg)',
-          background: `linear-gradient(135deg, ${themeColors.bgAlt}CC 0%, ${themeColors.bg}E6 100%)`,
+          // Translucent by design, across every theme.
+          //
+          // The card sits over the canvas wallpaper, so opacity is what
+          // makes it read as a pane of glass rather than a rectangle
+          // pasted on top. Blur is essential to that: transparency
+          // without it just shows a busy background through the text and
+          // destroys readability. Both are user-tunable in Settings →
+          // Appearance, and the terminal keeps its own contrast floor
+          // (minimumContrastRatio) so text stays legible at any setting.
+          background: `linear-gradient(135deg, ${withAlpha(themeColors.bgAlt, cardOpacity)} 0%, ${withAlpha(themeColors.bg, Math.min(1, cardOpacity + 0.08))} 100%)`,
+          backdropFilter: cardBlur > 0 ? `blur(${cardBlur}px) saturate(1.35)` : undefined,
+          WebkitBackdropFilter: cardBlur > 0 ? `blur(${cardBlur}px) saturate(1.35)` : undefined,
           border: flash
             ? '1px solid rgba(255, 68, 68, 0.7)'
-            : selectedAgentId === agent.id
+            : approval
+              ? '1px solid color-mix(in srgb, var(--warning) 75%, transparent)'
+              : selectedAgentId === agent.id
               ? `1px solid ${brandColor}70`
               : '1px solid rgba(255, 255, 255, 0.12)',
           boxShadow: flash
@@ -166,6 +258,8 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
               : 'inset 0 1px 0 rgba(255,255,255,0.05)',
           position: 'relative',
           zIndex: 0,
+          backfaceVisibility: 'hidden',
+          WebkitBackfaceVisibility: 'hidden',
         }}
       >
         {/* Frosted glass noise overlay */}
@@ -191,7 +285,7 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
             display: 'flex', alignItems: 'center', gap: 8,
             padding: '0 12px',
             height: 40,
-            background: 'var(--surface-alt)',
+            background: `linear-gradient(180deg, ${withAlpha(themeColors.bgAlt, Math.min(1, cardOpacity + 0.10))} 0%, ${withAlpha(themeColors.bgAlt, cardOpacity)} 100%)`,
             borderBottom: minimized
               ? 'none'
               : '1px solid var(--border-dim)',
@@ -212,6 +306,68 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
           <span style={{ fontFamily: "'JetBrains Mono', 'Cascadia Code', monospace", fontSize: 13, letterSpacing: 0.3, color: 'var(--text)', fontWeight: 600, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {agent.name}
           </span>
+          {usesMcp && (
+            <span
+              title={mcp?.connected
+                ? `Connected to ORCH${mcp.client ? ` (${mcp.client})` : ''} — this agent can see and use the canvas`
+                : 'Not connected to ORCH yet — it connects when the agent starts'}
+              aria-label={mcp?.connected ? 'Connected to ORCH' : 'Not connected to ORCH'}
+              style={{
+                width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                background: mcp?.connected ? 'var(--success)' : 'var(--text-muted)',
+                opacity: mcp?.connected ? 1 : 0.45,
+                boxShadow: mcp?.connected ? '0 0 6px color-mix(in srgb, var(--success) 60%, transparent)' : 'none',
+              }}
+            />
+          )}
+          {usesMcp && (
+            <button
+              className="glass-btn no-drag"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                void useAppStore.getState().setController(isController ? null : agent.id);
+              }}
+              title={isController
+                ? 'Controller: this agent coordinates the others and stays in sync with ORCH in real time. Click to stop.'
+                : 'Make this agent the controller that coordinates the others'}
+              aria-label={isController ? 'Controller (click to clear)' : 'Make controller'}
+              aria-pressed={isController}
+              style={{
+                width: 24, height: 24, padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: isController ? 'color-mix(in srgb, var(--brand) 22%, transparent)' : 'var(--glass-bg)',
+                border: `1px solid ${isController ? 'color-mix(in srgb, var(--brand) 60%, transparent)' : 'var(--glass-border)'}`,
+                color: isController ? 'var(--brand)' : 'var(--text-secondary)',
+              }}
+            >
+              <Crown size={12} />
+            </button>
+          )}
+          {supportsApproval && (
+            <button
+              className="glass-btn no-drag"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                void useApprovalStore.getState().setMode(agent.id, approvalMode === 'auto' ? 'manual' : 'auto');
+              }}
+              title={approvalMode === 'auto'
+                ? 'Auto: ORCH approves this agent\'s tool requests. Click for Manual.'
+                : 'Manual: this agent asks before running tools. Click for Auto.'}
+              aria-label={`Approval mode: ${approvalMode}`}
+              style={{
+                height: 24, padding: '0 8px', fontSize: 10.5, fontWeight: 600, letterSpacing: 0.3,
+                display: 'flex', alignItems: 'center', gap: 4, borderRadius: 'var(--radius-pill)',
+                background: approvalMode === 'auto' ? 'color-mix(in srgb, var(--warning) 14%, transparent)' : 'var(--glass-bg)',
+                border: `1px solid ${approvalMode === 'auto' ? 'color-mix(in srgb, var(--warning) 45%, transparent)' : 'var(--glass-border)'}`,
+                color: approvalMode === 'auto' ? 'var(--warning)' : 'var(--text-secondary)',
+                textShadow: 'none',
+              }}
+            >
+              {approvalMode === 'auto' ? <ShieldCheck size={12} /> : <Shield size={12} />}
+              {approvalMode === 'auto' ? 'Auto' : 'Manual'}
+            </button>
+          )}
           <button className="glass-btn no-drag" onClick={(e) => { e.stopPropagation(); setMinimized(!minimized); }}
             style={{ width: 24, height: 24, padding: 0, fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--glass-bg)', border: '1px solid var(--glass-border)', color: 'var(--text-secondary)' }}>
             {minimized ? <Maximize2 size={12} /> : <Minus size={12} />}
@@ -221,6 +377,60 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
             <X size={12} />
           </button>
         </div>
+
+        {/* Pending approval. Shown even when minimised: a waiting agent
+            is exactly the one you need to find. */}
+        {approval && (
+          <div
+            className="no-drag"
+            role="alert"
+            onMouseDown={(e) => e.stopPropagation()}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px',
+              background: 'color-mix(in srgb, var(--warning) 13%, transparent)',
+              borderBottom: '1px solid color-mix(in srgb, var(--warning) 35%, transparent)',
+              fontSize: 12, color: 'var(--text)',
+            }}
+          >
+            <ShieldAlert size={14} style={{ color: 'var(--warning)', flexShrink: 0 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {approval.kind === 'trust' ? 'Trust this folder?' : 'Needs approval'}
+              </div>
+              <div
+                title={approval.detail}
+                style={{
+                  fontFamily: "'JetBrains Mono', 'Cascadia Code', monospace", fontSize: 11,
+                  color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                }}
+              >
+                {approval.detail}
+              </div>
+            </div>
+            <button
+              disabled={answering}
+              onClick={() => void respond('deny')}
+              style={{
+                padding: '5px 10px', fontSize: 11, fontWeight: 600, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                border: '1px solid var(--border)', background: 'transparent', color: 'var(--text)', fontFamily: 'inherit',
+              }}
+            >
+              Deny
+            </button>
+            <button
+              disabled={answering}
+              onClick={() => void respond('approve')}
+              style={{
+                padding: '5px 12px', fontSize: 11, fontWeight: 700, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                border: '1px solid color-mix(in srgb, var(--warning) 60%, transparent)',
+                background: 'color-mix(in srgb, var(--warning) 22%, transparent)',
+                color: 'var(--text)', fontFamily: 'inherit',
+              }}
+            >
+              {approval.kind === 'trust' ? 'Trust' : 'Approve'}
+            </button>
+          </div>
+        )}
 
         {/* Terminal content */}
         {!minimized && (
@@ -234,7 +444,7 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
                 <span>Agent sleeping — click to wake</span>
               </div>
             ) : agent.terminalId && agent.provider && ['claude-code', 'codex', 'opencode', 'hermes'].includes(agent.provider) ? (
-                  <CliTerminal sessionId={agent.terminalId} />
+                  <CliTerminal sessionId={agent.terminalId} agentName={agent.name} />
             ) : agent.provider && ['cursor', 'antigravity'].includes(agent.provider) ? (
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)', fontSize: 13, textAlign: 'center', padding: 20 }}>
                 {agent.provider === 'cursor'
@@ -306,6 +516,33 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
         )}
         </div>
       </GlassPanel>
+
+        {/* Back face — rotated into place, hidden until the card flips. */}
+        <div
+          style={{
+            position: 'absolute', inset: 0,
+            transform: 'rotateY(180deg)',
+            backfaceVisibility: 'hidden',
+            WebkitBackfaceVisibility: 'hidden',
+            borderRadius: 'var(--radius-lg)',
+            overflow: 'hidden',
+            border: `1px solid ${agent.color}40`,
+            // Non-interactive while face-down, so a click can't land on a
+            // control the user can't see.
+            pointerEvents: flipView ? 'auto' : 'none',
+          }}
+          aria-hidden={!flipView}
+        >
+          <AgentCardBack
+            report={report}
+            agentName={agent.name}
+            providerId={agent.provider}
+            color={agent.color}
+            conflicts={conflicts}
+            unread={report ? 0 : 0}
+          />
+        </div>
+      </div>
     </div>
   );
 });

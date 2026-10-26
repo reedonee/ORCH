@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch supersedes the previous run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck, lint, test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # ORCH ships on all three, and the main process is full of
+        # platform-specific paths (node-pty spawning, `where` vs `which`,
+        # Scripts/ vs bin/). A Linux-only CI would miss most of that.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # node-pty builds native bindings. Skipping scripts keeps CI fast
+      # and independent of a working toolchain; nothing here runs a PTY.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Typecheck
+        # Covers src/, vite.config.ts AND electron/ — the main process was
+        # excluded from tsc for a long time, which is how two null-deref
+        # crashes shipped.
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        # Layout engine, voice parser, narration, colour helpers. The
+        # Python sidecar suite self-skips when no voice venv is present.
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  sidecar:
+    name: Voice sidecar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The sidecar's logic tests (chunking, TTS cancellation) need only
+      # numpy — not the multi-GB ONNX model stack.
+      - name: Install minimal sidecar deps
+        run: |
+          python -m venv .venv-voice
+          .venv-voice/bin/python -m pip install --upgrade pip
+          .venv-voice/bin/python -m pip install numpy
+
+      - name: Sidecar logic tests
+        run: node tests/run-sidecar-check.mjs
+
+      - name: Python syntax check
+        run: .venv-voice/bin/python -m compileall -q electron/voice-server.py
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # This repo has shipped a hardcoded admin password and a committed
+      # VPS deploy secret before. A scan is cheap insurance.
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

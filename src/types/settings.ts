@@ -71,7 +71,9 @@ export const BUILTIN_PROVIDERS: AgentProvider[] = [
     id: 'claude-code',
     name: 'Claude Code',
     command: 'claude',
-    args: ['--dangerously-skip-permissions'],
+    // No --dangerously-skip-permissions: prompts go to the card instead,
+    // and per-agent Auto approval answers them (see agent-approvals.ts).
+    args: [],
     type: 'builtin',
     shell: false,
     envKey: 'anthropic',

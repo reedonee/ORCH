@@ -56,6 +56,12 @@ export class EventBus {
   // ── Blackboard task store ─────────────────────────────────────
   private tasks: BlackboardTask[] = [];
 
+  /** Observer invoked for every emitted event. main.ts wires this to
+   *  forward whitelisted types to the renderer over IPC. Kept as a plain
+   *  callback rather than a listener list — there is exactly one consumer
+   *  and it must never be able to throw into the emit path. */
+  onEmit: (event: OrchEvent) => void = () => {};
+
   /** Emit an event — stored in the log and checked against subscriptions. */
   emit(type: string, sourceAgentId: string, data: Record<string, unknown> = {}, targetAgentId?: string): OrchEvent {
     const event: OrchEvent = {
@@ -69,6 +75,11 @@ export class EventBus {
     this.events.push(event);
     if (this.events.length > MAX_EVENTS) {
       this.events.splice(0, this.events.length - MAX_EVENTS);
+    }
+    try {
+      this.onEmit(event);
+    } catch (err) {
+      console.warn('[EventBus] onEmit observer threw:', err);
     }
     return event;
   }

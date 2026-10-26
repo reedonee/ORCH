@@ -3,6 +3,7 @@
 // Each workspace = a user-chosen directory containing .orch-workspace.json
 
 import { create } from 'zustand';
+import { invoke } from '../lib/electron-api';
 import {
   selectWorkspaceFolder,
   writeWorkspaceFile,
@@ -30,12 +31,20 @@ import type {
   WorkspaceStyleData,
 } from '../types/workspace';
 import {
-  resolveLayout,
   findSpawnSlot,
   computeSafeRegion,
+  frameViewport,
   CHROME,
 } from '../lib/layout-engine';
 import type { PanelItem, SafeRegion, ChromeInsets } from '../lib/layout-engine';
+import {
+  runLayout,
+  boundingBox,
+  isLayoutMode,
+  type LayoutNode,
+  type LayoutModeName,
+  type Region as EngineRegion,
+} from '../lib/layout-modes';
 
 // ── Layout Engine Specification ─────────────────────────────────
 export const LAYOUT_ENGINE_SPEC = {
@@ -76,7 +85,18 @@ export const LAYOUT_ENGINE_SPEC = {
   defaultAgentHeight: 360,
 } as const;
 
-export type LayoutMode = 'tidy' | 'grid' | 'stage';
+/** 'tidy' is kept as an alias of 'grid' for workspaces saved by older
+ *  builds; everything else maps 1:1 onto the engine's modes. */
+export type LayoutMode = LayoutModeName | 'tidy';
+
+export interface ArrangeOptions {
+  /** Agent to feature in focus mode. Defaults to the current selection. */
+  focusId?: string | null;
+  /** Re-frame the viewport to fit the result. Default true. */
+  frame?: boolean;
+  /** Keep user-pinned panels pinned. Default false (explicit arrange). */
+  preserveLocks?: boolean;
+}
 
 export interface CanvasWindowSettings {
   allowAgentCanvasControl: boolean;
@@ -160,8 +180,6 @@ function collectPanels(): PanelItem[] {
       y: p.y,
       width: p.width,
       height: p.height,
-      naturalW: p.width,
-      naturalH: p.height,
       locked: p.locked,
     });
   }
@@ -256,6 +274,33 @@ function subscribeAgentLifecycle() {
   });
 }
 
+/** Adapt the panel registry to the layout engine's node shape. */
+function collectLayoutNodes(): LayoutNode[] {
+  return collectPanels().map((p) => ({
+    id: p.id,
+    type: p.type,
+    x: p.x,
+    y: p.y,
+    width: p.width,
+    height: p.height,
+    locked: p.locked,
+  }));
+}
+
+/** SafeRegion and the engine's Region are structurally identical today,
+ *  but they are owned by different modules — convert explicitly so a
+ *  future change to either one is a compile error, not a silent bug. */
+function toEngineRegion(r: SafeRegion): EngineRegion {
+  return {
+    left: r.left,
+    top: r.top,
+    right: r.right,
+    bottom: r.bottom,
+    width: r.width,
+    height: r.height,
+  };
+}
+
 // ── Debounce timers ────────────────────────────────────────────
 // Two distinct debounce paths:
 //   debounceAutoArrange()         — fires autoArrange() which CLEARS locks
@@ -324,24 +369,12 @@ function debounceReflowAroundLocks() {
 
 /** Arrange WITHOUT clearing locks — keeps user-resized panels in place and
  *  reflows the others around them. Used only by the resize subscription. */
+/** Reflow around user-pinned panels without re-framing the camera.
+ *  Used by the resize subscription so a manual resize isn't undone and
+ *  the viewport doesn't jump while the user is dragging a corner. */
 function autoArrangeRespectingLocks() {
-  const panels = collectPanels();
-  if (panels.length === 0) return;
-  const { viewportWinSize, viewportPan, viewportZoom } = useAppStore.getState();
-  const browser = useBrowserStore.getState();
-  const music = useMusicPlayerStore.getState();
-  const grid = LAYOUT_ENGINE_SPEC.arrangements.gridSnap;
-  const gen = ++layoutGeneration;
-  const result = resolveLayout({
-    panels,
-    viewport: { w: viewportWinSize.w, h: viewportWinSize.h, pan: viewportPan, zoom: viewportZoom },
-    browserVisible: browser.visible,
-    musicVisible: music.visible,
-    grid,
-    chromeInsets: measureChromeInsets(),
-  });
-  if (layoutGeneration !== gen) return; // stale — discard
-  commitLayoutResult(result.positions, result.sizes, result.pan, result.zoom, null);
+  const ws = useWorkspaceStore.getState();
+  ws.arrange(ws.layoutMode ?? 'grid', { preserveLocks: true, frame: false });
 }
 
 // ── Viewport Frame Commit ──────────────────────────────────────
@@ -402,10 +435,13 @@ interface WorkspaceState {
   markClean: () => void;
   clearError: () => void;
 
+  /** Primary entry point — every mode goes through here. */
+  arrange: (mode?: LayoutMode, options?: ArrangeOptions) => void;
   autoArrange: () => void;
   arrangeTidy: () => void;
   arrangeGrid: () => void;
   arrangeStage: () => void;
+  arrangeFocus: (focusId?: string) => void;
   setLayoutMode: (mode: LayoutMode | null) => void;
   notifyAgentChanged: () => void;
   toggleSetting: (key: keyof CanvasWindowSettings) => void;
@@ -514,6 +550,11 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => {
       const updated = updateRecentList(get().recentWorkspaces, folderPath, name, now);
       await saveRecentWorkspaces(updated);
       set({ currentWorkspacePath: folderPath, currentWorkspaceName: name, recentWorkspaces: updated, isDirty: false, isBusy: false });
+      // Mirror to the main process so agents spawned before the renderer
+      // has restored a workspace still land somewhere sensible.
+      invoke('local_db_save_settings', {
+        settings: { preferences: { lastWorkspacePath: folderPath } },
+      }).catch(() => {});
       const authStatus = useAuthStore.getState().status;
       if (authStatus === 'authenticated') {
         upsertWorkspace({ name, canvas_data: data, style: style as any })
@@ -645,103 +686,95 @@ export const useWorkspaceStore = create<WorkspaceState>()((set, get) => {
 
   // ── Layout Engine Actions ───────────────────────────────────
 
-  autoArrange: () => {
-    clearAllLocks();
-    const panels = collectPanels();
-    if (panels.length === 0) return;
-    const { viewportWinSize } = useAppStore.getState();
-    const { viewportPan, viewportZoom } = useAppStore.getState();
+  // ── Arrange ────────────────────────────────────────────────
+  // One implementation for every mode. Previously autoArrange /
+  // arrangeTidy / arrangeGrid / arrangeStage were four near-identical
+  // copies that differed only in the label they committed — and
+  // arrangeGrid simply called arrangeTidy, so "tidy" and "grid" were
+  // literally the same layout.
+  arrange: (mode: LayoutMode = 'grid', options: ArrangeOptions = {}) => {
+    if (!options.preserveLocks) clearAllLocks();
+
+    const nodes = collectLayoutNodes();
+    if (nodes.length === 0) return;
+
+    const app = useAppStore.getState();
+    const { viewportWinSize } = app;
     const browser = useBrowserStore.getState();
-    const music = useMusicPlayerStore.getState();
-    const grid = LAYOUT_ENGINE_SPEC.arrangements.gridSnap;
+
+    // The browser panel dominates the canvas when open, so stage mode is
+    // the right default whenever it is visible and the caller didn't ask
+    // for something specific.
+    const effective: LayoutModeName =
+      mode === 'stage' && !browser.visible ? 'grid'
+      : isLayoutMode(mode) ? mode
+      : 'grid';
+
+    const region = toEngineRegion(
+      computeSafeRegion(
+        viewportWinSize.w,
+        viewportWinSize.h,
+        LAYOUT_ENGINE_SPEC.arrangements.gridSnap,
+        measureChromeInsets(),
+      ),
+    );
 
     const gen = ++layoutGeneration;
-    const result = resolveLayout({
-      panels,
-      viewport: { w: viewportWinSize.w, h: viewportWinSize.h, pan: viewportPan, zoom: viewportZoom },
-      browserVisible: browser.visible,
-      musicVisible: music.visible,
-      grid,
-      chromeInsets: measureChromeInsets(),
+
+    const placements = runLayout(nodes, region, effective, {
+      gap: LAYOUT_ENGINE_SPEC.arrangements.tidyPadding,
+      grid: 8,
+      focusId: options.focusId ?? app.selectedAgentId,
+      links: app.delegationLinks
+        .filter((l) => l.fromAgentId && l.toAgentId)
+        .map((l) => ({ from: l.fromAgentId, to: l.toAgentId })),
     });
-    if (layoutGeneration !== gen) return; // stale — discard
-    commitLayoutResult(result.positions, result.sizes, result.pan, result.zoom, null);
-  },
 
-  arrangeTidy: () => {
-    clearAllLocks();
-    const panels = collectPanels();
-    if (panels.length === 0) return;
-    const { viewportWinSize } = useAppStore.getState();
-    const { viewportPan, viewportZoom } = useAppStore.getState();
-    const browser = useBrowserStore.getState();
-    const music = useMusicPlayerStore.getState();
-    const grid = LAYOUT_ENGINE_SPEC.arrangements.gridSnap;
+    if (layoutGeneration !== gen) return; // stale — a newer arrange won
 
-    const gen = ++layoutGeneration;
-    const result = resolveLayout({
-      panels,
-      viewport: { w: viewportWinSize.w, h: viewportWinSize.h, pan: viewportPan, zoom: viewportZoom },
-      browserVisible: browser.visible,
-      musicVisible: music.visible,
-      grid,
-      chromeInsets: measureChromeInsets(),
-    });
-    if (layoutGeneration !== gen) return; // stale — discard
-    commitLayoutResult(result.positions, result.sizes, result.pan, result.zoom, 'tidy');
-  },
+    const positions = placements.map((p) => ({ id: p.id, x: p.x, y: p.y }));
+    const sizes = placements.map((p) => ({ id: p.id, width: p.width, height: p.height }));
 
-  arrangeGrid: () => {
-    get().arrangeTidy();
-  },
-
-  arrangeStage: () => {
-    clearAllLocks();
-    const panels = collectPanels();
-    if (panels.length === 0) return;
-    const browser = useBrowserStore.getState();
-    if (!browser.visible) {
-      get().arrangeTidy();
-      return;
+    // Framing is opt-out: an arrange triggered by a resize or a spawn
+    // shouldn't yank the camera out from under the user.
+    let pan = app.viewportPan;
+    let zoom = app.viewportZoom;
+    if (options.frame !== false) {
+      const framed = frameViewport(
+        boundingBox(placements),
+        viewportWinSize.w,
+        viewportWinSize.h,
+        LAYOUT_ENGINE_SPEC.framer,
+      );
+      pan = framed.pan;
+      zoom = framed.zoom;
     }
-    const { viewportWinSize } = useAppStore.getState();
-    const { viewportPan, viewportZoom } = useAppStore.getState();
-    const music = useMusicPlayerStore.getState();
-    const grid = LAYOUT_ENGINE_SPEC.arrangements.gridSnap;
 
-    const gen = ++layoutGeneration;
-    const result = resolveLayout({
-      panels,
-      viewport: { w: viewportWinSize.w, h: viewportWinSize.h, pan: viewportPan, zoom: viewportZoom },
-      browserVisible: true,
-      musicVisible: music.visible,
-      grid,
-      chromeInsets: measureChromeInsets(),
-    });
-    if (layoutGeneration !== gen) return; // stale — discard
-    commitLayoutResult(result.positions, result.sizes, result.pan, result.zoom, 'stage');
+    commitLayoutResult(positions, sizes, pan, zoom, effective);
   },
+
+  // ── Compatibility wrappers ─────────────────────────────────
+  autoArrange:  () => { useWorkspaceStore.getState().arrange('grid'); },
+  arrangeTidy:  () => { useWorkspaceStore.getState().arrange('grid'); },
+  arrangeGrid:  () => { useWorkspaceStore.getState().arrange('grid'); },
+  arrangeStage: () => { useWorkspaceStore.getState().arrange('stage'); },
+  arrangeFocus: (focusId?: string) => { useWorkspaceStore.getState().arrange('focus', { focusId }); },
 
   setLayoutMode: (mode) => {
     if (!mode) {
       set({ layoutMode: null, layoutPhase: 'idle', layoutTransition: '' });
       return;
     }
-    const { autoArrange, arrangeGrid, arrangeStage } = get();
-    switch (mode) {
-      case 'tidy':  autoArrange(); break;
-      case 'grid':  arrangeGrid(); break;
-      case 'stage': arrangeStage(); break;
-    }
+    get().arrange(mode);
   },
 
   notifyAgentChanged: () => {
-    const { layoutMode, autoArrange, arrangeGrid, arrangeStage } = get();
-    switch (layoutMode) {
-      case 'tidy':  autoArrange(); break;
-      case 'grid':  arrangeGrid(); break;
-      case 'stage': arrangeStage(); break;
-    }
+    // An agent appeared or disappeared. Re-run the active mode, but leave
+    // the camera alone: re-framing on every spawn made the whole canvas
+    // lurch each time an agent started.
+    const { layoutMode } = get();
+    if (!layoutMode) return;
+    get().arrange(layoutMode, { frame: false });
   },
 
   toggleSetting: (key) => {

@@ -15,6 +15,44 @@ interface SettingsState extends Settings {
   setApiKey: (provider: string, key: string, endpoint?: string) => void;
   removeApiKey: (provider: string) => void;
   getApiKey: (provider: string) => string | undefined;
+
+  // ── Appearance ─────────────────────────────────────────────
+  /** Agent card translucency, 0.35 (very glassy) → 1 (solid). */
+  cardOpacity: number;
+  setCardOpacity: (v: number) => void;
+  /** Backdrop blur behind translucent surfaces, in px. */
+  cardBlur: number;
+  setCardBlur: (v: number) => void;
+  /** Darkness of the scrim behind terminal text, 0 (none) → 1 (opaque).
+   *  Independent of card transparency because terminal text needs far
+   *  more contrast than chrome does. */
+  terminalScrim: number;
+  setTerminalScrim: (v: number) => void;
+  /** 'full' = no cell background ever paints (DOM renderer, uniform glass).
+   *  'gpu'  = WebGL renderer; faster, but a TUI's own background colours
+   *           still paint as solid blocks. */
+  terminalTransparency: 'full' | 'gpu';
+  setTerminalTransparency: (v: 'full' | 'gpu') => void;
+  /** Respect the OS "reduce motion" preference and damp animations. */
+  reduceMotion: boolean;
+  setReduceMotion: (v: boolean) => void;
+
+  // ── Voice ──────────────────────────────────────────────────
+  /** Kokoro voice id. */
+  voiceId: string;
+  setVoiceId: (v: string) => void;
+  /** Speech rate, 0.5 → 2.0. */
+  voiceSpeed: number;
+  setVoiceSpeed: (v: number) => void;
+  /** Speak agent lifecycle events aloud. */
+  speakLifecycle: boolean;
+  setSpeakLifecycle: (v: boolean) => void;
+  /** Approval mode for agents that have not been given their own. */
+  defaultApprovalMode: 'auto' | 'manual';
+  setDefaultApprovalMode: (v: 'auto' | 'manual') => void;
+  /** TTS playback volume, 0 (mute) → 1. */
+  voiceVolume: number;
+  setVoiceVolume: (v: number) => void;
   addMcpServer: (server: McpConfig) => void;
   removeMcpServer: (id: string) => void;
   toggleMcpServer: (id: string) => void;
@@ -96,6 +134,28 @@ export const useSettingsStore = create<SettingsState>()(
           return { customProviders, providers: mergeProviders(customProviders) };
         }),
       setTerminalFontSize: (size) => set({ terminalFontSize: size }),
+
+      cardOpacity: 0.72,
+      setCardOpacity: (v) => set({ cardOpacity: Math.max(0.35, Math.min(1, v)) }),
+      cardBlur: 18,
+      setCardBlur: (v) => set({ cardBlur: Math.max(0, Math.min(40, v)) }),
+      terminalScrim: 0.72,
+      setTerminalScrim: (v) => set({ terminalScrim: Math.max(0, Math.min(1, v)) }),
+      terminalTransparency: 'full',
+      setTerminalTransparency: (v) => set({ terminalTransparency: v }),
+      reduceMotion: false,
+      setReduceMotion: (v) => set({ reduceMotion: v }),
+
+      voiceId: 'af_bella',
+      setVoiceId: (v) => set({ voiceId: v }),
+      voiceSpeed: 1.0,
+      setVoiceSpeed: (v) => set({ voiceSpeed: Math.max(0.5, Math.min(2, v)) }),
+      speakLifecycle: true,
+      setSpeakLifecycle: (v) => set({ speakLifecycle: v }),
+      defaultApprovalMode: 'manual',
+      setDefaultApprovalMode: (v) => set({ defaultApprovalMode: v }),
+      voiceVolume: 0.85,
+      setVoiceVolume: (v) => set({ voiceVolume: Math.max(0, Math.min(1, v)) }),
       setHibernationEnabled: (on) => set({ hibernationEnabled: on }),
       setCloudAgents: (on) => set({ cloudAgents: on }),
       setGridSnap: (on) => set({ gridSnap: on }),
@@ -137,6 +197,16 @@ export const useSettingsStore = create<SettingsState>()(
         instantStart: state.instantStart,
         shortcuts: state.shortcuts,
         pttKey: state.pttKey,
+        cardOpacity: state.cardOpacity,
+        cardBlur: state.cardBlur,
+        terminalScrim: state.terminalScrim,
+        terminalTransparency: state.terminalTransparency,
+        reduceMotion: state.reduceMotion,
+        voiceId: state.voiceId,
+        voiceSpeed: state.voiceSpeed,
+        speakLifecycle: state.speakLifecycle,
+        defaultApprovalMode: state.defaultApprovalMode,
+        voiceVolume: state.voiceVolume,
       }),
     }
   )

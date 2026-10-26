@@ -3,6 +3,8 @@
 // Replaces @tauri-apps/api/core (invoke) and @tauri-apps/api/event (listen)
 // Keeps the same calling convention so existing code needs minimal changes.
 
+import type { PendingApproval } from '../stores/useApprovalStore';
+
 /**
  * Augment window.electronAPI with methods exposed by preload.ts.
  * The base type is declared by the electron-vite toolchain in
@@ -164,16 +166,52 @@ export function voiceModelStatus(): Promise<VoiceModelStatus> {
 
 // ── Agent Install ──────────────────────────────────────────────────
 
-export function installProvider(providerId: string, command: string, packageName?: string): Promise<{ success: boolean; message: string }> {
+/** Main installs only its own allowlisted package for `providerId`. */
+export function installProvider(providerId: string): Promise<{ success: boolean; message: string }> {
   if (!api) return Promise.resolve({ success: false, message: 'no api' });
-  return api.invoke('install_provider', { providerId, command, packageName }) as Promise<{ success: boolean; message: string }>;
+  return api.invoke('install_provider', { providerId }) as Promise<{ success: boolean; message: string }>;
 }
 
 // ── Canvas Assets ─────────────────────────────────────────────────
 
-export function saveCanvasAsset(data: string, ext: string): Promise<{ success: boolean; path: string }> {
+export interface SavedAsset {
+  success: boolean;
+  /** Absolute path on disk — pass this to agents. */
+  path?: string;
+  /** orch-asset:// URL — use this as an <img>/<video> src. */
+  url?: string;
+  sizeBytes?: number;
+  ext?: string;
+  error?: string;
+}
+
+export function saveCanvasAsset(data: string, ext: string): Promise<SavedAsset> {
   if (!api) return Promise.resolve({ success: false, path: '' });
   return api.invoke('save_canvas_asset', { data, ext }) as Promise<{ success: boolean; path: string }>;
+}
+
+/** An agent's MCP connection to ORCH opened or closed. */
+export function onMcpConnection(cb: (data: { agentId: string; connected: boolean; client?: string }) => void): () => void {
+  if (!api) return () => {};
+  return api.listen('mcp_connection', cb);
+}
+
+/** The controller changed (null = none). */
+export function onControllerChanged(cb: (data: { agentId: string | null }) => void): () => void {
+  if (!api) return () => {};
+  return api.listen('controller_changed', cb);
+}
+
+/** An agent addressed ORCH (agent_send to "orch") and no controller took it. */
+export function onOrchUserMessage(cb: (data: { from: string; subject: string; body: string; kind: string }) => void): () => void {
+  if (!api) return () => {};
+  return api.listen('orch_user_message', cb);
+}
+
+/** A permission prompt opened (`pending`) or closed (`null`) on an agent. */
+export function onAgentApproval(cb: (data: { agentId: string; pending: PendingApproval | null }) => void): () => void {
+  if (!api) return () => {};
+  return api.listen('agent_approval', cb);
 }
 
 export function onInstallProgress(cb: (data: { providerId: string; phase: string; percent: number; message: string }) => void): () => void {
@@ -333,7 +371,111 @@ export function onVoiceFinal(cb: (text: string) => void): () => void {
   return api.listen('voice_final', cb);
 }
 
-export function onVoiceAudio(cb: (data: { id: string; data: string }) => void): () => void {
+export interface VoiceAudioChunk {
+  id: string;
+  seq: number;
+  final: boolean;
+  sampleRate: number;
+  data: string;
+}
+
+// ── Diagnostics ────────────────────────────────────────────────
+
+export interface CrashReport {
+  id: string;
+  kind: string;
+  message: string;
+  stack?: string;
+  timestamp: string;
+  appVersion: string;
+  platform: string;
+  arch: string;
+  electron: string;
+  context?: Record<string, unknown>;
+}
+
+export function diagnosticsList(limit = 20): Promise<CrashReport[]> {
+  return invoke('diagnostics_list', { limit });
+}
+
+export function diagnosticsClear(): Promise<{ cleared: number }> {
+  return invoke('diagnostics_clear');
+}
+
+export function diagnosticsDir(): Promise<string> {
+  return invoke('diagnostics_dir');
+}
+
+export function diagnosticsOpenDir(): Promise<{ success: boolean }> {
+  return invoke('diagnostics_open_dir');
+}
+
+export function reportRendererError(
+  message: string,
+  stack?: string,
+  context?: Record<string, unknown>,
+): Promise<{ success: boolean; id?: string }> {
+  return invoke('diagnostics_report', { message, stack, context });
+}
+
+// ── Session transcripts ────────────────────────────────────────
+// Byte-exact agent output, backed by an append-only file per session.
+
+export interface TranscriptMatch {
+  offset: number;
+  line: number;
+  text: string;
+}
+
+export interface TranscriptStats {
+  sessionId: string;
+  bytes: number;
+  live: boolean;
+  modifiedAt: number;
+}
+
+/** Raw scrollback tail, verbatim (ANSI intact). */
+export function readTerminal(sessionId: string, maxBytes?: number): Promise<string> {
+  return invoke('read_terminal', { sessionId, maxBytes });
+}
+
+export function transcriptRead(sessionId: string, offset: number, length?: number): Promise<string> {
+  return invoke('transcript_read', { sessionId, offset, length });
+}
+
+export function transcriptFull(sessionId: string, plain = false): Promise<string> {
+  return invoke('transcript_full', { sessionId, plain });
+}
+
+export function transcriptSearch(
+  sessionId: string,
+  query: string,
+  opts?: { caseSensitive?: boolean; regex?: boolean; limit?: number },
+): Promise<TranscriptMatch[]> {
+  return invoke('transcript_search', { sessionId, query, ...opts });
+}
+
+export function transcriptStats(sessionId: string): Promise<TranscriptStats | null> {
+  return invoke('transcript_stats', { sessionId });
+}
+
+export function transcriptList(): Promise<TranscriptStats[]> {
+  return invoke('transcript_list');
+}
+
+export function transcriptDir(): Promise<string> {
+  return invoke('transcript_dir');
+}
+
+export function transcriptExport(sessionId: string, plain = false): Promise<{ success: boolean; path?: string; error?: string; canceled?: boolean }> {
+  return invoke('transcript_export', { sessionId, plain });
+}
+
+export function voiceConfigure(voice?: string, speed?: number): Promise<{ success: boolean }> {
+  return invoke('voice_configure', { voice, speed });
+}
+
+export function onVoiceAudio(cb: (data: VoiceAudioChunk) => void): () => void {
   if (!api) return () => {};
   return api.listen('voice_audio', cb);
 }

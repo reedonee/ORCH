@@ -1,119 +1,203 @@
 // ── ORCH Eraser Overlay ───────────────────────────────────────
-// Transparent overlay that appears when eraser tool is active.
-// Catches clicks, finds the nearest canvas element, and deletes it.
-// Hit-testing uses proper measurement for text elements.
+// Drag to erase, with a brush you can see.
+//
+// The old eraser deleted on click and hit-tested strokes by sampling
+// their stored vertices — which, after simplification, can sit 60 units
+// apart. A stroke was effectively unerasable anywhere except right on a
+// sample point, and a whole erasing pass left one undo entry per
+// deleted element.
+//
+// Now: the brush sweeps a segment per pointer move, hit-testing against
+// real geometry (see canvas-geometry), and a whole pass is one undo
+// step.
 
-import React, { useCallback } from 'react';
-import { useCanvasStore, type CanvasElement } from '../stores/useCanvasStore';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useCanvasStore } from '../stores/useCanvasStore';
+import { hitTestElement, type Rect } from '../lib/canvas-geometry';
+import { useLatestRef } from '../lib/use-latest-ref';
 
 interface EraserOverlayProps {
   pan: { x: number; y: number };
   zoom: number;
 }
 
-// ── Text measurement cache ─────────────────────────────────────
-// Uses an offscreen canvas context for accurate text width.
-const measCtxRef: { ctx: CanvasRenderingContext2D | null } = { ctx: null };
+/** Brush radius in screen pixels, before the stroke-width modifier. */
+const BASE_RADIUS = 12;
 
-function getMeasureCtx(): CanvasRenderingContext2D | null {
-  if (measCtxRef.ctx) return measCtxRef.ctx;
-  try {
-    const c = document.createElement('canvas');
-    const ctx = c.getContext('2d');
-    if (ctx) measCtxRef.ctx = ctx;
-    return ctx;
-  } catch { return null; }
-}
-
-function measureTextWidth(text: string, fontSize: number): number {
-  const ctx = getMeasureCtx();
-  if (!ctx) return text.length * 8.5; // fallback
-  ctx.font = `${fontSize}px 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace`;
-  const lines = text.split('\n');
-  let maxW = 0;
-  for (const line of lines) {
-    const w = ctx.measureText(line).width;
-    if (w > maxW) maxW = w;
-  }
-  return maxW + 4; // +4 for padding
-}
-
-function measureTextHeight(text: string, fontSize: number): number {
-  const lines = text.split('\n').length;
-  return fontSize * lines * 1.4;
-}
-
-// ── Hit testing ────────────────────────────────────────────────
-function isPointInElement(pt: { x: number; y: number }, el: CanvasElement): boolean {
-  const ex = el.x ?? 0;
-  const ey = el.y ?? 0;
-
-  switch (el.type) {
-    case 'shape': {
-      let w = el.width ?? 80;
-      let h = el.height ?? 80;
-      let x = ex, y = ey;
-      if (w < 0) { x += w; w = Math.abs(w); }
-      if (h < 0) { y += h; h = Math.abs(h); }
-      return pt.x >= x && pt.x <= x + w && pt.y >= y && pt.y <= y + h;
-    }
-    case 'text': {
-      const textContent = el.text || '';
-      const textW = measureTextWidth(textContent, el.fontSize || 14);
-      const textH = measureTextHeight(textContent, el.fontSize || 14);
-      return pt.x >= ex && pt.x <= ex + textW && pt.y >= ey && pt.y <= ey + textH;
-    }
-    case 'image': {
-      const imgW = el.width || 200;
-      const imgH = el.height || 150;
-      return pt.x >= ex && pt.x <= ex + imgW && pt.y >= ey && pt.y <= ey + imgH;
-    }
-    case 'drawing': {
-      if (!el.points || el.points.length === 0) return false;
-      const threshold = 10;
-      for (const p of el.points) {
-        const dx = pt.x - p.x;
-        const dy = pt.y - p.y;
-        if (Math.sqrt(dx * dx + dy * dy) < threshold) return true;
-      }
-      return false;
-    }
-    default:
-      return false;
-  }
-}
-
-// ── Component ──────────────────────────────────────────────────
 export const EraserOverlay: React.FC<EraserOverlayProps> = ({ pan, zoom }) => {
   const activeTool = useCanvasStore((s) => s.activeTool);
-  const elements = useCanvasStore((s) => s.elements);
-  const removeElement = useCanvasStore((s) => s.removeElement);
+  const strokeWidth = useCanvasStore((s) => s.strokeWidth);
 
-  const handleClick = useCallback((e: React.MouseEvent) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const cx = (e.clientX - rect.left - pan.x) / zoom;
-    const cy = (e.clientY - rect.top - pan.y) / zoom;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const brushRef = useRef<HTMLDivElement>(null);
+  const erasingRef = useRef(false);
+  const lastRef = useRef<{ x: number; y: number } | null>(null);
+  const [doomed, setDoomed] = useState<Rect[]>([]);
 
-    for (let i = elements.length - 1; i >= 0; i--) {
-      const el = elements[i];
-      if (isPointInElement({ x: cx, y: cy }, el)) {
-        removeElement(el.id);
-        return;
+  const isEraser = activeTool === 'eraser';
+  const radiusPx = BASE_RADIUS + strokeWidth * 2;
+
+  const viewRef = useLatestRef({ pan, zoom, radiusPx });
+
+  const toCanvas = useCallback((clientX: number, clientY: number) => {
+    const rect = rootRef.current?.getBoundingClientRect();
+    const { pan: p, zoom: z } = viewRef.current;
+    if (!rect) return { x: clientX, y: clientY };
+    return { x: (clientX - rect.left - p.x) / z, y: (clientY - rect.top - p.y) / z };
+  }, [viewRef]);
+
+  /**
+   * Erase everything the brush touched between two samples.
+   *
+   * Testing only the current point leaves gaps at any speed the pointer
+   * can actually move, so the segment is walked at brush-radius steps.
+   */
+  const sweep = useCallback((from: { x: number; y: number } | null, to: { x: number; y: number }) => {
+    const store = useCanvasStore.getState();
+    const r = viewRef.current.radiusPx / viewRef.current.zoom;
+
+    const samples: Array<{ x: number; y: number }> = [to];
+    if (from) {
+      const dist = Math.hypot(to.x - from.x, to.y - from.y);
+      const steps = Math.min(64, Math.ceil(dist / Math.max(1, r * 0.6)));
+      for (let i = 1; i < steps; i++) {
+        samples.push({
+          x: from.x + ((to.x - from.x) * i) / steps,
+          y: from.y + ((to.y - from.y) * i) / steps,
+        });
       }
     }
-  }, [elements, removeElement, pan, zoom]);
 
-  if (activeTool !== 'eraser') return null;
+    const kill: string[] = [];
+    for (const el of store.elements) {
+      if (el.locked) continue;
+      if (samples.some((s) => hitTestElement(s, el, r))) kill.push(el.id);
+    }
+    if (kill.length > 0) store.removeElements(kill);
+  }, [viewRef]);
+
+  const moveBrush = useCallback((clientX: number, clientY: number) => {
+    const rect = rootRef.current?.getBoundingClientRect();
+    const brush = brushRef.current;
+    if (!rect || !brush) return;
+    // Positioned imperatively: a state update per pointer move would
+    // re-render the whole overlay 120 times a second for a cursor.
+    brush.style.transform =
+      `translate(${clientX - rect.left}px, ${clientY - rect.top}px) translate(-50%, -50%)`;
+  }, []);
+
+  const onPointerDown = useCallback((e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const store = useCanvasStore.getState();
+    // One undo step for the whole pass, however many elements it eats.
+    store.beginInteraction();
+    erasingRef.current = true;
+    const pt = toCanvas(e.clientX, e.clientY);
+    lastRef.current = pt;
+    setDoomed([]);
+    sweep(null, pt);
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not capturable */ }
+  }, [toCanvas, sweep]);
+
+  const onPointerMove = useCallback((e: React.PointerEvent) => {
+    moveBrush(e.clientX, e.clientY);
+    const pt = toCanvas(e.clientX, e.clientY);
+
+    if (erasingRef.current) {
+      sweep(lastRef.current, pt);
+      lastRef.current = pt;
+      return;
+    }
+
+    // Not pressed: show what a click would take. Highlighting before
+    // committing is the difference between an eraser and a trapdoor.
+    const store = useCanvasStore.getState();
+    const r = viewRef.current.radiusPx / viewRef.current.zoom;
+    const hits: Rect[] = [];
+    for (const el of store.elements) {
+      if (el.locked) continue;
+      if (!hitTestElement(pt, el, r)) continue;
+      const b = el.type === 'drawing'
+        ? null
+        : { x: el.x ?? 0, y: el.y ?? 0, width: el.width ?? 0, height: el.height ?? 0 };
+      if (b && b.width && b.height) hits.push(b);
+    }
+    setDoomed((prev) =>
+      prev.length === hits.length &&
+      prev.every((p, i) => p.x === hits[i].x && p.y === hits[i].y && p.width === hits[i].width)
+        ? prev
+        : hits,
+    );
+  }, [toCanvas, sweep, moveBrush, viewRef]);
+
+  const stop = useCallback(() => {
+    if (!erasingRef.current) return;
+    erasingRef.current = false;
+    lastRef.current = null;
+    useCanvasStore.getState().endInteraction();
+  }, []);
+
+  const onPointerUp = useCallback((e: React.PointerEvent) => {
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    stop();
+  }, [stop]);
+
+  // Switching tools or losing the window mid-pass must close the undo
+  // group, or every later edit joins it and Ctrl+Z swallows the lot.
+  useEffect(() => {
+    if (!isEraser) { stop(); return; }
+    window.addEventListener('blur', stop);
+    return () => { window.removeEventListener('blur', stop); stop(); };
+  }, [isEraser, stop]);
+
+  if (!isEraser) return null;
 
   return (
     <div
-      style={{
-        position: 'absolute', inset: 0,
-        cursor: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='8' fill='none' stroke='%23ff781f' stroke-width='2' opacity='0.8'/%3E%3Ccircle cx='12' cy='12' r='4' fill='%23ff781f' opacity='0.3'/%3E%3Cline x1='6' y1='6' x2='18' y2='18' stroke='%23ff781f' stroke-width='2' opacity='0.8'/%3E%3Cline x1='18' y1='6' x2='6' y2='18' stroke='%23ff781f' stroke-width='2' opacity='0.8'/%3E%3C/svg%3E") 12 12, crosshair`,
-        zIndex: 65,
-        pointerEvents: activeTool === 'eraser' ? 'auto' : 'none',
-      }}
-      onClick={handleClick}
-    />
+      ref={rootRef}
+      style={{ position: 'absolute', inset: 0, zIndex: 65, cursor: 'none', overflow: 'hidden' }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      onPointerLeave={() => { if (brushRef.current) brushRef.current.style.opacity = '0'; }}
+      onPointerEnter={() => { if (brushRef.current) brushRef.current.style.opacity = '1'; }}
+    >
+      {/* What the brush is currently over. */}
+      <svg
+        style={{
+          position: 'absolute', inset: 0, width: '100%', height: '100%',
+          overflow: 'visible', pointerEvents: 'none',
+          transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+          transformOrigin: '0 0',
+        }}
+      >
+        {doomed.map((b, i) => (
+          <rect
+            key={i}
+            x={b.x} y={b.y} width={b.width} height={b.height}
+            fill="rgba(231,111,81,0.14)"
+            stroke="#E76F51"
+            strokeWidth={1.5 / (zoom || 1)}
+            strokeDasharray={`${4 / (zoom || 1)} ${3 / (zoom || 1)}`}
+          />
+        ))}
+      </svg>
+
+      <div
+        ref={brushRef}
+        style={{
+          position: 'absolute', left: 0, top: 0,
+          width: radiusPx * 2, height: radiusPx * 2,
+          borderRadius: '50%',
+          border: '1.5px solid rgba(231,111,81,0.9)',
+          background: 'rgba(231,111,81,0.12)',
+          boxShadow: '0 0 0 1px rgba(0,0,0,0.35)',
+          pointerEvents: 'none',
+          willChange: 'transform',
+        }}
+      />
+    </div>
   );
 };

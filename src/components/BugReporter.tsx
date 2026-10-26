@@ -45,26 +45,35 @@ const BugReporter: React.FC = () => {
   const titleRef = useRef<HTMLInputElement>(null);
 
   const ref = useRef<HTMLDivElement>(null);
-  const reg = usePanelRegistry();
+  // Narrow selectors instead of the whole registry: subscribing to the
+  // entire store re-rendered this panel on every unrelated panel move.
+  const activePanelId = usePanelRegistry((s) => s.activePanelId);
+  const dragPanelId = usePanelRegistry((s) => s.dragPanelId);
+  const resizePanelId = usePanelRegistry((s) => s.resizePanelId);
+  const zStack = usePanelRegistry((s) => s.zStack);
+  const registerPanel = usePanelRegistry((s) => s.registerPanel);
+  const unregisterPanel = usePanelRegistry((s) => s.unregisterPanel);
+  const updatePanel = usePanelRegistry((s) => s.updatePanel);
+  const focusPanel = usePanelRegistry((s) => s.focusPanel);
   const { dragHandlers, positionStyle, transition, isDragging } = usePanelDrag({ panelId: PANEL_ID, snapToGrid: 32 });
 
   const z = computePanelZIndex(PANEL_ID, 'canvas', 10, false,
-    reg.activePanelId, reg.dragPanelId, reg.resizePanelId, reg.zStack);
+    activePanelId, dragPanelId, resizePanelId, zStack);
 
   useEffect(() => {
-    reg.registerPanel({
+    registerPanel({
       id: PANEL_ID, type: 'feedback', space: 'canvas',
       x: window.innerWidth - W - 60, y: 70, width: W, height: H,
       minWidth: 360, minHeight: 320, defaultWidth: W, defaultHeight: H,
       participatesInAutoLayout: true, participatesInFraming: true, participatesInCollision: true,
       draggable: true, resizable: true, focusable: true, baseZIndex: 10,
     });
-    return () => { reg.unregisterPanel(PANEL_ID); };
+    return () => { unregisterPanel(PANEL_ID); };
   }, []);
 
   useEffect(() => {
     const h = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) reg.focusPanel(null);
+      if (ref.current && !ref.current.contains(e.target as Node)) focusPanel(null);
     };
     document.addEventListener('mousedown', h);
     return () => document.removeEventListener('mousedown', h);

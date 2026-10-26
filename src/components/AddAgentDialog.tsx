@@ -56,11 +56,14 @@ export const AddAgentDialog: React.FC<AddAgentDialogProps> = ({ onClose }) => {
 
     try {
       let termId: string | null = null;
+      // Mint the canvas id first so the PTY session is keyed by the same
+      // id the UI uses — see spawnProviderAgent() for the full rationale.
+      const agentId = crypto.randomUUID();
 
       if (launchMode === 'embedded') {
         termId = await createTerminal(
+          agentId,
           agentName,
-          `${agentName} Terminal`,
           provider?.command,
           provider?.args,
           Object.keys(env).length > 0 ? env : undefined,
@@ -85,13 +88,12 @@ export const AddAgentDialog: React.FC<AddAgentDialogProps> = ({ onClose }) => {
         });
       }
 
-      const { agents } = useAppStore.getState();
       const pos = useWorkspaceStore.getState().spawnPosition();
       const x = pos.x;
       const y = pos.y;
 
       await addAgent({
-        id: crypto.randomUUID(),
+        id: agentId,
         name: agentName,
         role,
         status: 'idle',

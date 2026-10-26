@@ -1,34 +1,48 @@
 {
   "name": "orch-electron",
   "private": true,
-  "version": "0.0.3",
+  "version": "0.0.4",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 231",
     "release": "electron-builder --publish always",
-    "release:dry": "electron-builder --publish never"
+    "release:dry": "electron-builder --publish never",
+    "test": "node --experimental-strip-types tests/layout-modes.check.mts && node --experimental-strip-types tests/voice-parser.check.mts && node --experimental-strip-types tests/voice-narration.check.mts && node --experimental-strip-types tests/voice-audio.check.mts && node --experimental-strip-types tests/canvas-geometry.check.mts && node --experimental-strip-types --import ./tests/ts-resolve-hook.mjs tests/canvas-store.check.mts && node --experimental-strip-types tests/color.check.mts && node --experimental-strip-types tests/agent-mesh.check.mts && node --experimental-strip-types tests/mcp-agent-config.check.mts && node --experimental-strip-types tests/agent-approvals.check.mts && node --experimental-strip-types --import ./tests/ts-resolve-hook.mjs tests/mcp-server.check.mts && node tests/run-sidecar-check.mjs",
+    "typecheck": "tsc -b",
+    "test:layout": "node --experimental-strip-types tests/layout-modes.check.mts",
+    "test:voice": "node --experimental-strip-types tests/voice-parser.check.mts",
+    "test:sidecar": "node tests/run-sidecar-check.mjs",
+    "test:sidecar:e2e": "node tests/run-sidecar-check.mjs tests/voice_server_e2e.py",
+    "lint:fix": "eslint . --fix",
+    "test:mesh": "node --experimental-strip-types tests/agent-mesh.check.mts",
+    "test:audio": "node --experimental-strip-types tests/voice-audio.check.mts",
+    "test:geometry": "node --experimental-strip-types tests/canvas-geometry.check.mts",
+    "test:store": "node --experimental-strip-types --import ./tests/ts-resolve-hook.mjs tests/canvas-store.check.mts",
+    "test:mcp": "node --experimental-strip-types tests/mcp-agent-config.check.mts && node --experimental-strip-types --import ./tests/ts-resolve-hook.mjs tests/mcp-server.check.mts",
+    "test:mcp:live": "node tests/mcp-endpoint.check.mjs",
+    "test:approvals": "node --experimental-strip-types tests/agent-approvals.check.mts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@supabase/supabase-js": "^2.108.2",
-    "@xterm/addon-canvas": "^0.7.0",
+    "@xterm/addon-clipboard": "^0.2.0",
     "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-search": "^0.16.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/addon-unicode11": "^0.9.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^5.5.0",
-    "chokidar": "^5.0.0",
     "electron-updater": "^6.8.9",
     "lucide-react": "^1.20.0",
-    "pg": "^8.22.0",
+    "node-pty": "^1.1.0",
     "play-dl": "^1.9.7",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "ws": "^8.21.0",
-    "node-pty": "^1.1.0",
     "zustand": "^5.0.14"
   },
   "devDependencies": {
@@ -36,7 +50,6 @@
     "@types/node": "^24.12.3",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.0.1",
     "electron": "^35.0.0",
     "electron-builder": "^26.0.0",
@@ -53,7 +66,7 @@
   "build": {
     "appId": "com.orch.electron",
     "productName": "ORCH",
-    "copyright": "Copyright © 2026 redCRAFT",
+    "copyright": "Copyright \u00a9 2026 redCRAFT",
     "directories": {
       "output": "release"
     },
@@ -67,7 +80,18 @@
       {
         "from": "build/",
         "to": "build/",
-        "filter": ["**/*", "!installer.nsh"]
+        "filter": [
+          "**/*",
+          "!installer.nsh"
+        ]
+      },
+      {
+        "from": "electron/voice-server.py",
+        "to": "electron/voice-server.py"
+      },
+      {
+        "from": "electron/requirements-voice.txt",
+        "to": "electron/requirements-voice.txt"
       }
     ],
     "publish": {
@@ -91,7 +115,9 @@
     },
     "protocols": {
       "name": "ORCH Workspace Protocol",
-      "schemes": ["orch"]
+      "schemes": [
+        "orch"
+      ]
     },
     "win": {
       "target": "nsis",

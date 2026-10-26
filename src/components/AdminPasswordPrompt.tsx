@@ -1,12 +1,28 @@
-// ── Admin Password Prompt ─────────────────────────────────────
-// Modal dialog that asks for the admin passkey before unlocking
-// the admin features (ForgeNode Inbox tab, etc.).
+// ── Admin Panel Unlock ────────────────────────────────────────
+// Reveals admin-only UI (the ForgeNode Inbox tab, etc.).
+//
+// THIS IS NOT A SECURITY BOUNDARY, and must not be treated as one.
+// Everything here runs in the renderer, so anyone can bypass it by
+// editing the bundle or calling the store setter from devtools. It exists
+// only to keep admin UI out of the way during normal use.
+//
+// The real authorization lives in Postgres: supabase/migrations/
+// 003_feedbacks_rls.sql restricts feedback rows to their author plus
+// members of admin_users, enforced by RLS. Unlocking this panel without
+// a matching admin row shows an empty inbox, because the server refuses
+// to return anyone else's rows.
+//
+// The passphrase previously sat here as a string literal
+// (`const ADMIN_PASSWORD = '...'`), shipped inside every binary and
+// committed to the repo. It now comes from a build-time env var, so at
+// least it is not published — but the point above still stands.
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
 import { Lock, X } from 'lucide-react';
 
-const ADMIN_PASSWORD = 'orch@99*';
+/** Set VITE_ADMIN_PASSPHRASE at build time. Empty disables the prompt. */
+const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSPHRASE ?? '';
 
 interface AdminPasswordPromptProps {
   onSuccess: () => void;
@@ -27,7 +43,9 @@ const AdminPasswordPrompt: React.FC<AdminPasswordPromptProps> = ({ onSuccess, on
   }, [onClose]);
 
   const handleSubmit = () => {
-    if (value === ADMIN_PASSWORD) {
+    // An unset passphrase must never unlock — otherwise a build that
+    // forgot the env var would grant admin UI to an empty input.
+    if (ADMIN_PASSWORD.length > 0 && value === ADMIN_PASSWORD) {
       setLocked(true);
       setTimeout(onSuccess, 300);
     } else {

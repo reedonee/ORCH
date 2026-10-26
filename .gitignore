@@ -35,3 +35,7 @@ desktop.ini
 # ── Temp / Cache ─────────────────────────────────────────────
 *.tar.gz
 orch-sync-*.tar.gz
+
+# ── Python voice virtualenv ──────────────────────────────────
+.venv-voice/
+.venv/

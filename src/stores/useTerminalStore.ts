@@ -35,8 +35,20 @@ export const useTerminalStore = create<TerminalState>()(
 
       createTerminal: async (agentId, name, command?, args?, env?, kind?, providerId?, delegationDepth?, contextSnapshot?) => {
         try {
+          // Resolve the workspace here, not at each call site — six
+          // different places spawn agents and any one of them forgetting
+          // would silently drop the agent into the wrong directory.
+          const { useWorkspaceStore } = await import('./useWorkspaceStore');
+          const cwd = useWorkspaceStore.getState().currentWorkspacePath;
+          // Same reasoning for the approval mode: an agent's own choice,
+          // else the Settings default, decided once for every call site.
+          const { useApprovalStore } = await import('./useApprovalStore');
+          const { useSettingsStore } = await import('./useSettingsStore');
+          const approvalMode = useApprovalStore.getState().modes[agentId]
+            ?? useSettingsStore.getState().defaultApprovalMode;
+
           const id = await invoke<string>('create_terminal', {
-            agentId, name,
+            agentId, name, cwd, approvalMode,
             command: command || null,
             args: args || null,
             env: env || null,

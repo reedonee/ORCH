@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from 'react';
+import { reportRendererError } from '../lib/electron-api';
 
 interface Props {
   children: ReactNode;
@@ -17,7 +18,18 @@ export class ErrorBoundary extends Component<Props, State> {
     return { hasError: true, error };
   }
 
-  render() {
+  override componentDidCatch(error: Error, info: { componentStack?: string | null }) {
+    // Without this the error is swallowed by the boundary and never
+    // reaches the console, which makes a blank canvas impossible to debug.
+    console.error('[ErrorBoundary] Caught render error:', error, info.componentStack);
+    // Persist it too — a console message is gone the moment the user
+    // closes DevTools, and most users never open them.
+    reportRendererError(error.message, error.stack, {
+      componentStack: info.componentStack?.slice(0, 4000),
+    }).catch(() => {});
+  }
+
+  override render() {
     if (this.state.hasError) {
       return (
         this.props.fallback || (

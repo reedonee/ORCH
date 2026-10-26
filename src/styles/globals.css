@@ -180,3 +180,27 @@ html, body, #root {
 .xterm-rows {
   font-variant-ligatures: none !important;
 }
+
+
+/* ── Agent mesh UI ──────────────────────────────────────────── */
+
+@keyframes orch-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes orch-toast-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Users who ask the OS for less motion get none of the decorative kind.
+   The card flip still happens — it conveys state, not decoration — but
+   instantly rather than as an animation. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

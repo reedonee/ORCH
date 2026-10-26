@@ -3,6 +3,7 @@ import { useAppStore } from '../stores/useAppStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useWorkspaceStore } from '../stores/useWorkspaceStore';
+import { useProviderStore } from '../stores/useProviderStore';
 import { PROVIDER_ICONS } from './icons/ProviderIcon';
 import { AppLogo } from './icons/AppLogo';
 import { Settings, X, Maximize2, Minimize2, FolderOpen, ChevronDown, RotateCcw, Hammer } from 'lucide-react';
@@ -58,6 +59,7 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
   const [mcpUrl, setMcpUrl] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(() => !!document.fullscreenElement);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const providerStatuses = useProviderStore((s) => s.statuses);
   const wsDropdownRef = useRef<HTMLDivElement>(null);
 
   // Fetch MCP server URL on mount
@@ -79,6 +81,16 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
       document.documentElement.requestFullscreen();
     }
   };
+
+  // Re-probe when the menu opens, so a CLI installed since launch shows
+  // up without restarting ORCH.
+  useEffect(() => {
+    if (!showDropdown) return;
+    const specs = providers
+      .filter((p) => p.shell === false)
+      .map((p) => ({ id: p.id, name: p.name, command: p.command, args: p.args }));
+    if (specs.length) useProviderStore.getState().probeAll(specs);
+  }, [showDropdown, providers]);
 
   // close dropdown on click outside
   useEffect(() => {
@@ -131,12 +143,15 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
 
     try {
       let termId: string | null = null;
+      // Mint the canvas id first so the PTY session is keyed by the same
+      // id the UI uses — see spawnProviderAgent() for the full rationale.
+      const agentId = crypto.randomUUID();
 
       if (launchMode === 'embedded') {
         // ── Local node-pty session ──
         termId = await createTerminal(
+          agentId,
           name,
-          `${name} Terminal`,
           provider.command,
           provider.args,
           Object.keys(env).length > 0 ? env : undefined,
@@ -145,15 +160,13 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
         );
       }
 
-      const store = useAppStore.getState();
-      const { agents } = store;
       // Spawn at the layout engine's computed position
       const pos = useWorkspaceStore.getState().spawnPosition();
       const x = pos.x;
       const y = pos.y;
 
       const newAgent = {
-        id: crypto.randomUUID(),
+        id: agentId,
         name,
         role,
         status: 'idle' as const,
@@ -369,31 +382,47 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
             >
               {providers.filter((p) => p.id !== 'cmd' && p.id !== 'bash' && p.id !== 'wsl').map((p) => {
                 const isCreating = creating === p.id;
+                // Offering an agent that isn't installed just produces a
+                // card whose terminal immediately dies with "command not
+                // found" — the user has no way to tell that apart from a
+                // real crash. Shell providers are always available; CLI
+                // ones are gated on the startup probe.
+                const status = providerStatuses[p.id];
+                const probed = status !== undefined;
+                const installed = p.shell !== false || status?.available === true;
+                const disabled = isCreating || (probed && !installed);
+
                 return (
                   <button
                     key={p.id}
-                    onClick={() => handleCreate(p.id)}
-                    disabled={isCreating}
+                    onClick={() => { if (!disabled) handleCreate(p.id); }}
+                    disabled={disabled}
+                    title={
+                      disabled && !isCreating
+                        ? `${p.name} isn't installed. Install it, then reopen this menu.`
+                        : undefined
+                    }
                     style={{
                       display: 'flex', alignItems: 'center', gap: 10,
                       width: '100%', padding: '10px 12px',
                       borderRadius: 'var(--radius-md)',
                       background: 'transparent',
                       border: 'none',
-                      color: isCreating ? 'var(--text-muted)' : 'var(--text)',
-                      cursor: isCreating ? 'wait' : 'pointer',
+                      color: disabled ? 'var(--text-muted)' : 'var(--text)',
+                      opacity: disabled && !isCreating ? 0.45 : 1,
+                      cursor: isCreating ? 'wait' : disabled ? 'not-allowed' : 'pointer',
                       fontSize: 13, fontWeight: 500,
                       textAlign: 'left',
                       fontFamily: 'inherit',
                       transition: 'background var(--anim-fast)',
                     }}
-                    onMouseEnter={(e) => { if (!isCreating) e.currentTarget.style.background = 'color-mix(in srgb, var(--brand) 12%, transparent)'; }}
+                    onMouseEnter={(e) => { if (!disabled) e.currentTarget.style.background = 'color-mix(in srgb, var(--brand) 12%, transparent)'; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                   >
                     <span style={{
                       width: 28, height: 28, borderRadius: 6,
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      flexShrink: 0, color: 'var(--brand)',
+                      flexShrink: 0, color: disabled ? 'var(--text-muted)' : 'var(--brand)',
                     }}>
                       {(() => {
                         const ProviderSvg = PROVIDER_ICONS[p.id];
@@ -404,6 +433,11 @@ export const PillBar: React.FC<PillBarProps> = ({ onOpenSettings, onOpenWorkspac
                     </span>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 600, fontFamily: 'var(--font-accent)' }}>{p.name}</div>
+                      {disabled && !isCreating && (
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+                          Not installed
+                        </div>
+                      )}
                     </div>
                     {isCreating && <span style={{ fontSize: 11, color: 'var(--brand)' }}>…</span>}
                   </button>

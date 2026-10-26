@@ -1,226 +1,304 @@
 // ── ORCH Canvas Elements ───────────────────────────────────────
-// Isolated sub-components for text notes and dropped images.
-// Prevents InfiniteCanvas re-renders on every drawing stroke.
-// Supports inline editing + drag-to-move in select mode.
-// Uses shared drag target from canvas store to prevent conflicts.
+// Text notes and media nodes — the two element types that render as
+// real DOM rather than into the canvas or SVG layers.
+//
+// Isolated from InfiniteCanvas so a drawing stroke does not re-render
+// the whole canvas.
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { useCanvasStore } from '../stores/useCanvasStore';
+import { useCanvasStore, type CanvasElement } from '../stores/useCanvasStore';
+import { CanvasMediaNode } from './CanvasMediaNode';
+import { sortByPaintOrder } from '../lib/canvas-geometry';
+import { useLatestRef } from '../lib/use-latest-ref';
 
-export const CanvasTextNotes: React.FC = () => {
+const ACCENT = '#F4A261';
+const DEFAULT_TEXT_WIDTH = 260;
+const MIN_TEXT_WIDTH = 60;
+
+/**
+ * The open editor for one note.
+ *
+ * A separate component so its draft is seeded by useState at mount
+ * rather than by an effect that fires after the textarea has already
+ * painted empty.
+ */
+const TextNoteEditor: React.FC<{ el: CanvasElement }> = ({ el }) => {
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [draft, setDraft] = useState(el.text || '');
+
+  useEffect(() => {
+    const t = requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
+    return () => cancelAnimationFrame(t);
+  }, []);
+
+  const close = useCallback((keep: boolean) => {
+    const store = useCanvasStore.getState();
+    store.setEditingElement(null);
+    const text = draft.trim();
+    if (!keep) {
+      // Cancelling a note that never had text leaves nothing worth
+      // keeping — and an empty note is invisible, so it would be
+      // clutter no one could select or erase.
+      if (!(el.text || '').trim()) store.removeElement(el.id);
+      return;
+    }
+    if (!text) { store.removeElement(el.id); return; }
+    if (draft !== (el.text || '')) store.updateElement(el.id, { text: draft });
+  }, [draft, el.id, el.text]);
+
+  return (
+    <textarea
+      ref={inputRef}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => close(true)}
+      onMouseDown={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Escape') { e.preventDefault(); close(false); }
+        else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); close(true); }
+      }}
+      placeholder="Note…"
+      style={{
+        position: 'absolute',
+        left: el.x ?? 0, top: el.y ?? 0,
+        width: el.width || DEFAULT_TEXT_WIDTH,
+        minHeight: (el.fontSize || 14) * 1.8,
+        fontSize: el.fontSize || 14,
+        lineHeight: 1.4,
+        color: el.strokeColor,
+        background: 'rgba(14,26,20,0.94)',
+        border: `1px solid ${ACCENT}`,
+        borderRadius: 4,
+        padding: '4px 6px',
+        outline: 'none',
+        resize: 'none',
+        overflow: 'hidden',
+        fontFamily: "'JetBrains Mono', monospace",
+        pointerEvents: 'auto',
+        zIndex: 9999,
+      }}
+    />
+  );
+};
+
+interface TextNoteProps {
+  el: CanvasElement;
+  zoom: number;
+  isSelect: boolean;
+  isSelected: boolean;
+  isEditing: boolean;
+}
+
+/**
+ * One text note.
+ *
+ * Split out per element so each owns its measurement observer — the
+ * previous single component re-ran every note's effects whenever any
+ * note changed.
+ */
+const TextNote: React.FC<TextNoteProps> = ({ el, zoom, isSelect, isSelected, isEditing }) => {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ mx: number; my: number; ox: number; oy: number } | null>(null);
+  const resizeRef = useRef<{ mx: number; ow: number } | null>(null);
+
+  const [hovered, setHovered] = useState(false);
+  const [gesture, setGesture] = useState<null | 'move' | 'resize'>(null);
+
+  const zoomRef = useLatestRef(zoom);
+
+  const width = el.width || DEFAULT_TEXT_WIDTH;
+
+  // ── Measure the painted box ─────────────────────────────────
+  // Hit-testing, the lasso and the eraser all need to know how big a
+  // note actually is. Estimating from character counts never matched
+  // the rendered text, so the DOM reports it and the value is cached on
+  // the element — quietly, since it is not a user edit.
+  useEffect(() => {
+    const node = boxRef.current;
+    if (!node || isEditing || typeof ResizeObserver === 'undefined') return;
+    // Height only. Width is authoritative — writing offsetWidth back
+    // would feed the padding into it and grow the note by 6px on every
+    // observation, forever.
+    const ro = new ResizeObserver(() => {
+      const h = node.offsetHeight;
+      if (!h) return;
+      const cur = useCanvasStore.getState().elements.find((x) => x.id === el.id);
+      if (!cur || Math.abs((cur.height ?? 0) - h) <= 1) return;
+      useCanvasStore.getState().updateElementQuiet(el.id, { height: h });
+    });
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, [el.id, isEditing]);
+
+  // ── Move / resize ───────────────────────────────────────────
+  useEffect(() => {
+    if (!gesture) return;
+    const store = useCanvasStore.getState();
+
+    const onMove = (e: MouseEvent) => {
+      const z = zoomRef.current || 1;
+      if (gesture === 'move' && dragRef.current) {
+        const d = dragRef.current;
+        // Pointer deltas are screen pixels. Applying them straight to
+        // canvas coordinates, as this used to, made a note run away
+        // from the cursor at any zoom other than 1.
+        let dx = (e.clientX - d.mx) / z;
+        let dy = (e.clientY - d.my) / z;
+        if (e.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
+        store.updateElement(el.id, { x: d.ox + dx, y: d.oy + dy });
+      } else if (gesture === 'resize' && resizeRef.current) {
+        const r = resizeRef.current;
+        const w = Math.max(MIN_TEXT_WIDTH, r.ow + (e.clientX - r.mx) / z);
+        store.updateElement(el.id, { width: w });
+      }
+    };
+
+    const onUp = () => {
+      dragRef.current = null;
+      resizeRef.current = null;
+      setGesture(null);
+      store.endInteraction();
+      store.setDragTarget(null);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [gesture, el.id, zoomRef]);
+
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    if (!isSelect || isEditing || e.button !== 0) return;
+    const store = useCanvasStore.getState();
+    if (store.dragTarget) return;
+    e.stopPropagation();
+
+    store.toggleSelection(el.id, e.shiftKey || e.metaKey || e.ctrlKey);
+    // The whole drag is one undo step, not one per mousemove.
+    store.beginInteraction();
+    store.setDragTarget(`text:${el.id}`);
+    dragRef.current = { mx: e.clientX, my: e.clientY, ox: el.x ?? 0, oy: el.y ?? 0 };
+    setGesture('move');
+  }, [isSelect, isEditing, el.id, el.x, el.y]);
+
+  if (isEditing) {
+    return <TextNoteEditor el={el} />;
+  }
+
+  const showHandle = isSelect && (hovered || isSelected);
+
+  return (
+    <div
+      ref={boxRef}
+      data-canvas-text={el.id}
+      onMouseDown={onMouseDown}
+      onDoubleClick={(e) => {
+        if (!isSelect) return;
+        e.stopPropagation();
+        useCanvasStore.getState().setEditingElement(el.id);
+      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        position: 'absolute',
+        left: el.x ?? 0, top: el.y ?? 0,
+        width,
+        fontSize: el.fontSize || 14,
+        lineHeight: 1.4,
+        color: el.strokeColor,
+        opacity: el.opacity ?? 1,
+        transform: el.rotation ? `rotate(${el.rotation}deg)` : undefined,
+        transformOrigin: 'center center',
+        pointerEvents: isSelect ? 'auto' : 'none',
+        cursor: gesture === 'move' ? 'grabbing' : isSelect ? 'move' : 'default',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        padding: '2px 3px',
+        borderRadius: 3,
+        textShadow: '0 1px 4px rgba(0,0,0,0.8)',
+        userSelect: 'none',
+        outline: isSelected
+          ? `1.5px solid ${ACCENT}`
+          : hovered && isSelect
+            ? `1px solid ${ACCENT}55`
+            : 'none',
+        outlineOffset: 1,
+        transition: 'outline 120ms ease',
+      }}
+    >
+      {el.text}
+
+      {/* Width handle on the right edge. Height follows the text. */}
+      {showHandle && (
+        <div
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            const store = useCanvasStore.getState();
+            store.beginInteraction();
+            store.setDragTarget(`text:${el.id}`);
+            resizeRef.current = { mx: e.clientX, ow: width };
+            setGesture('resize');
+          }}
+          style={{
+            position: 'absolute',
+            right: -4, top: 0, bottom: 0, width: 8,
+            cursor: 'ew-resize',
+          }}
+        />
+      )}
+    </div>
+  );
+};
+
+export const CanvasTextNotes: React.FC<{ zoom?: number }> = ({ zoom = 1 }) => {
   const elements = useCanvasStore((s) => s.elements);
   const activeTool = useCanvasStore((s) => s.activeTool);
-  const updateElement = useCanvasStore((s) => s.updateElement);
-  const dragTarget = useCanvasStore((s) => s.dragTarget);
-  const setDragTarget = useCanvasStore((s) => s.setDragTarget);
   const selectedElementIds = useCanvasStore((s) => s.selectedElementIds);
-  const setSelectedElementIds = useCanvasStore((s) => s.setSelectedElementIds);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editText, setEditText] = useState('');
-  const [dragId, setDragId] = useState<string | null>(null);
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const [resizeTextId, setResizeTextId] = useState<string | null>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const dragRef = useRef({ elX: 0, elY: 0, mx: 0, my: 0 });
-  const resizeStartRef = useRef({ startY: 0, startSize: 0 });
+  const editingElementId = useCanvasStore((s) => s.editingElementId);
 
-  const textElements = elements.filter((el) => el.type === 'text');
   const isSelect = activeTool === 'select';
-  // isDraggingOther — reserved for future drag-other logic
-
-  useEffect(() => {
-    if (editingId && inputRef.current) {
-      inputRef.current.focus();
-      inputRef.current.select();
-    }
-  }, [editingId]);
-
-  // Window-level drag move
-  useEffect(() => {
-    if (!dragId) return;
-    const onMove = (e: MouseEvent) => {
-      const dx = e.clientX - dragRef.current.mx;
-      const dy = e.clientY - dragRef.current.my;
-      updateElement(dragId, {
-        x: dragRef.current.elX + dx,
-        y: dragRef.current.elY + dy,
-      });
-    };
-    const onUp = () => {
-      setDragId(null);
-      setDragTarget(null);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, [dragId, updateElement, setDragTarget]);
-
-  // Window-level resize for text font size
-  useEffect(() => {
-    if (!resizeTextId) return;
-    const onMove = (e: MouseEvent) => {
-      const deltaY = e.clientY - resizeStartRef.current.startY;
-      const newSize = Math.max(8, Math.min(72, resizeStartRef.current.startSize + Math.round(deltaY / 10)));
-      useCanvasStore.getState().updateElement(resizeTextId, { fontSize: newSize });
-    };
-    const onUp = () => setResizeTextId(null);
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, [resizeTextId]);
-
-  const handleDragStart = useCallback((e: React.MouseEvent, el: { id: string; x?: number; y?: number }) => {
-    if (!isSelect) return;
-    // Don't start if another drag is in progress
-    if (dragTarget && dragTarget !== 'text:') return;
-    e.stopPropagation();
-    // Select the text element on click
-    setSelectedElementIds([el.id]);
-    setDragTarget(`text:${el.id}`);
-    dragRef.current = { elX: el.x ?? 0, elY: el.y ?? 0, mx: e.clientX, my: e.clientY };
-    setDragId(el.id);
-  }, [isSelect, dragTarget, setDragTarget, setSelectedElementIds]);
+  const textElements = sortByPaintOrder(elements.filter((el) => el.type === 'text'));
 
   return (
     <>
-      {textElements.map((el) => {
-        if (editingId === el.id) {
-          return (
-            <textarea
-              key={el.id}
-              ref={inputRef}
-              value={editText}
-              onChange={(e) => setEditText(e.target.value)}
-              onBlur={() => {
-                if (editText.trim()) updateElement(el.id, { text: editText });
-                setEditingId(null);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') setEditingId(null);
-                else if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  if (editText.trim()) updateElement(el.id, { text: editText });
-                  setEditingId(null);
-                }
-              }}
-              style={{
-                position: 'absolute',
-                left: el.x ?? 0,
-                top: el.y ?? 0,
-                fontSize: el.fontSize || 14,
-                color: el.strokeColor,
-                background: 'rgba(14,26,20,0.9)',
-                border: '1px solid rgba(255,120,31,0.3)',
-                borderRadius: 4,
-                padding: 4,
-                minWidth: 200,
-                minHeight: 40,
-                outline: 'none',
-                resize: 'both',
-                fontFamily: "'JetBrains Mono', monospace",
-                zIndex: 9999,
-              }}
-            />
-          );
-        }
-
-        const isHovered = hoveredId === el.id;
-        const isSelected = selectedElementIds.includes(el.id);
-        const showResize = isHovered && isSelect && !editingId && el.id !== resizeTextId;
-
-        return (
-          <div
-            key={el.id}
-            onMouseDown={(e) => handleDragStart(e, el)}
-            onDoubleClick={() => {
-              if (isSelect) {
-                setEditText(el.text || '');
-                setEditingId(el.id);
-              }
-            }}
-            onMouseEnter={() => { if (isSelect && !editingId) setHoveredId(el.id); }}
-            onMouseLeave={() => { if (hoveredId === el.id) setHoveredId(null); }}
-            style={{
-              position: 'absolute',
-              left: el.x ?? 0,
-              top: el.y ?? 0,
-              fontSize: el.fontSize || 14,
-              color: isHovered ? el.strokeColor : el.strokeColor,
-              pointerEvents: isSelect ? 'auto' : 'none',
-              cursor: isSelect ? 'move' : 'default',
-              whiteSpace: 'pre-wrap',
-              maxWidth: 300,
-              textShadow: isHovered
-                ? `0 0 12px ${el.strokeColor}40, 0 1px 4px rgba(0,0,0,0.8)`
-                : '0 1px 4px rgba(0,0,0,0.8)',
-              userSelect: isSelect ? 'auto' : 'none',
-              zIndex: el.zIndex,
-              padding: isHovered ? '1px 2px' : 0,
-              borderRadius: isHovered ? 2 : 0,
-              outline: isSelected
-                ? `1.5px solid #F4A261`
-                : isHovered
-                  ? `1px solid ${el.strokeColor}30`
-                  : 'none',
-              transition: 'text-shadow 120ms ease, outline 120ms ease, padding 120ms ease',
-            }}
-          >
-            {el.text}
-            {/* Resize handle at bottom-right */}
-            {showResize && (
-              <div
-                onMouseDown={(e) => {
-                  e.stopPropagation();
-                  setResizeTextId(el.id);
-                  resizeStartRef.current = { startY: e.clientY, startSize: el.fontSize || 14 };
-                }}
-                style={{
-                  position: 'absolute',
-                  bottom: -6, right: -6,
-                  width: 12, height: 12,
-                  cursor: 'nwse-resize',
-                  background: '#F4A261',
-                  borderRadius: 2,
-                  border: '1px solid rgba(0,0,0,0.5)',
-                  zIndex: 10,
-                }}
-              />
-            )}
-          </div>
-        );
-      })}
+      {textElements.map((el) => (
+        <TextNote
+          key={el.id}
+          el={el}
+          zoom={zoom}
+          isSelect={isSelect}
+          isSelected={selectedElementIds.includes(el.id)}
+          isEditing={editingElementId === el.id}
+        />
+      ))}
     </>
   );
 };
 
-export const CanvasImages: React.FC = () => {
+/**
+ * Media and file nodes — produced by agents, dropped, or pasted.
+ *
+ * Rendering lives in CanvasMediaNode so each node can own its own drag,
+ * resize and drop-onto-agent behaviour. This component only selects and
+ * positions them.
+ */
+export const CanvasImages: React.FC<{ zoom?: number }> = ({ zoom = 1 }) => {
   const elements = useCanvasStore((s) => s.elements);
-  const imageElements = elements.filter((el) => el.type === 'image');
+  const mediaElements = sortByPaintOrder(elements.filter((el) => el.type === 'image'));
+
+  if (mediaElements.length === 0) return null;
 
   return (
     <>
-      {imageElements.map((el) => (
-        <img
-          key={el.id}
-          src={el.src}
-          alt={el.alt || ''}
-          style={{
-            position: 'absolute',
-            left: el.x ?? 0,
-            top: el.y ?? 0,
-            width: el.width || 200,
-            height: el.height || 'auto',
-            borderRadius: 4,
-            pointerEvents: 'none',
-            zIndex: el.zIndex,
-          }}
-        />
+      {mediaElements.map((el) => (
+        <CanvasMediaNode key={el.id} el={el} zoom={zoom} />
       ))}
     </>
   );

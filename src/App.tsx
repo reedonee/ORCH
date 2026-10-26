@@ -16,10 +16,15 @@ import { useAuthStore } from './stores/useAuthStore';
 import { AuthDialog } from './components/AuthDialog';
 import AdminPasswordPrompt from './components/AdminPasswordPrompt';
 import { useSettingsStore } from './stores/useSettingsStore';
-import { voiceSpeak, saveRecentWorkspaces } from './lib/electron-api';
+import {
+  voiceSpeak, saveRecentWorkspaces, onAgentApproval, onMcpConnection, onControllerChanged, onOrchUserMessage, invoke,
+} from './lib/electron-api';
+import { narrateSpawn, narrateRemoval, spawnAnnouncementClaimed, narrateApproval, shortName } from './lib/voice-narration';
+import { useApprovalStore } from './stores/useApprovalStore';
 import { listWorkspaces } from './lib/db';
 import { Z_BASE_LAYERS } from './lib/z-stack-manager';
 import CommandPalette from './components/CommandPalette';
+import { ToastHost } from './components/ToastHost';
 import './styles/globals.css';
 import './styles/glass.css';
 
@@ -34,8 +39,9 @@ const App: React.FC = () => {
   const [adminPrompt, setAdminPrompt] = useState<{ error?: string } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Shift+Tab pins the flip view open; plain Tab is press-and-hold.
+  const flipPinnedRef = useRef(false);
   const isImage = theme.video.match(/\.(jpg|jpeg|png|gif|webp)$/i);
-  const prevCountRef = useRef(agents.length);
 
   // ── Auth gate ────────────────────────────────────────────────
   const authStatus = useAuthStore((s) => s.status);
@@ -111,22 +117,74 @@ const App: React.FC = () => {
   // useWorkspaceFileSync();
 
   // ── Agent lifecycle TTS ────────────────────────────────────
+  // Announces WHICH agent changed, by name. Comparing counts alone (the
+  // previous approach) could only ever say "Agent closed", which is
+  // useless with several running — and it identified new agents by
+  // provider id, so spawning Claude said "claude-code starting".
+  const prevAgentsRef = useRef<{ id: string; name: string }[]>([]);
   useEffect(() => {
-    const prev = prevCountRef.current;
-    const curr = agents.length;
-    prevCountRef.current = curr;
-    if (curr === 0 || prev === 0) return; // skip initial load
-    if (curr > prev) {
-      const newAgent = agents.find((_, i) => i >= prev);
-      if (newAgent) voiceSpeak('lifecycle', `${newAgent.provider || 'Agent'} starting`).catch(() => {});
-    } else if (curr < prev) {
-      voiceSpeak('lifecycle', 'Agent closed').catch(() => {});
+    const prev = prevAgentsRef.current;
+    const curr = agents.map((a) => ({ id: a.id, name: a.name }));
+    prevAgentsRef.current = curr;
+
+    if (prev.length === 0) return; // first load — don't narrate restoration
+
+    const prevIds = new Set(prev.map((a) => a.id));
+    const currIds = new Set(curr.map((a) => a.id));
+    const added = curr.filter((a) => !prevIds.has(a.id));
+    const removed = prev.filter((a) => !currIds.has(a.id));
+
+    // Spawns already speak their own confirmation through the command
+    // path, so only narrate additions that arrived some other way (MCP,
+    // workspace switch) to avoid saying it twice.
+    if (!useSettingsStore.getState().speakLifecycle) return;
+
+    if (removed.length > 0) {
+      voiceSpeak('lifecycle', narrateRemoval(removed.map((a) => a.name))).catch(() => {});
+    } else if (added.length > 0 && !spawnAnnouncementClaimed()) {
+      voiceSpeak('lifecycle', narrateSpawn(added.map((a) => a.name), 'starting')).catch(() => {});
     }
-  }, [agents.length]);
+  }, [agents]);
 
   useEffect(() => {
     loadAgents();
   }, [loadAgents]);
+
+  // ── Approvals: mirror prompts from main, and say each one aloud ──
+  // Spoken regardless of the lifecycle-announcement setting: a blocked
+  // agent is waiting on the user, which is exactly what voice is for.
+  useEffect(() => {
+    void useApprovalStore.getState().load();
+    return onAgentApproval(({ agentId, pending }) => {
+      useApprovalStore.getState().setPending(agentId, pending);
+      if (!pending) return;
+      const name = useAppStore.getState().agents.find((a) => a.id === agentId)?.name ?? pending.name;
+      voiceSpeak('approval', narrateApproval(name, pending.detail, pending.kind)).catch(() => {});
+      useAppStore.getState().pushToast({
+        text: `${shortName(name)} needs approval: ${pending.detail}`,
+        tone: 'warn',
+      });
+    });
+  }, []);
+
+  // ── MCP: who is connected, who is the controller, and messages that
+  // agents address to ORCH when there is no controller to take them ──
+  useEffect(() => {
+    void invoke<{ agentId: string | null }>('controller_get')
+      .then((c) => useAppStore.getState().setControllerFromMain(c?.agentId ?? null))
+      .catch(() => {});
+    const offs = [
+      onMcpConnection(({ agentId, connected, client }) => {
+        useAppStore.getState().setMcpConnection(agentId, { connected, client });
+      }),
+      onControllerChanged(({ agentId }) => useAppStore.getState().setControllerFromMain(agentId)),
+      onOrchUserMessage(({ from, subject, body }) => {
+        useAppStore.getState().pushToast({ text: `${shortName(from)}: ${subject}${body && body !== subject ? ` — ${body.slice(0, 140)}` : ''}`, tone: 'info' });
+        voiceSpeak('agent-message', `${shortName(from)} says: ${subject}`).catch(() => {});
+      }),
+    ];
+    return () => offs.forEach((off) => off());
+  }, []);
 
   // Apply theme CSS variables + inject smooth-transition rules
   useEffect(() => {
@@ -253,6 +311,36 @@ const App: React.FC = () => {
         return;
       }
 
+      // Escape releases a pinned flip view — otherwise Shift+Tab would
+      // leave every card face-down with no obvious way back.
+      if (e.key === 'Escape' && useAppStore.getState().flipView) {
+        e.preventDefault();
+        flipPinnedRef.current = false;
+        useAppStore.getState().setFlipView(false);
+        return;
+      }
+
+      // ── Flip every card to its status summary ───────────────
+      // Tab is the natural "show me the other side" key and is otherwise
+      // unused on the canvas. Held OR toggled: a quick press peeks, and
+      // Shift+Tab pins it so you can read at leisure.
+      if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const target = e.target as HTMLElement | null;
+        // Never steal Tab from a text field or the terminal.
+        const typing = target && (
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable ||
+          target.closest('.xterm')
+        );
+        if (!typing) {
+          e.preventDefault();
+          useAppStore.getState().setFlipView(true);
+          if (e.shiftKey) flipPinnedRef.current = true;
+        }
+        return;
+      }
+
       // ── Hidden admin passkey prompt ─────────────────────────
       if (((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'A' || e.key === 'a'))) {
         e.preventDefault();
@@ -266,8 +354,19 @@ const App: React.FC = () => {
         }
       }
     };
+    // Releasing Tab flips back, unless the view was pinned with Shift.
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Tab' && !flipPinnedRef.current) {
+        useAppStore.getState().setFlipView(false);
+      }
+    };
+
     window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handler);
+      window.removeEventListener('keyup', onKeyUp);
+    };
   }, []);
 
   // ── Pause video bg when window hidden — image bgs don't need this ──
@@ -364,6 +463,7 @@ const App: React.FC = () => {
       >
         <Bug size={15} />
       </button>
+      <ToastHost />
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
       {showWorkspace && <WorkspaceDialog onClose={() => setShowWorkspace(false)} />}
       {showAuth && <AuthDialog onClose={() => setShowAuth(false)} />}

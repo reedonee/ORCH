@@ -1,6 +1,14 @@
 // ── Local Database Engine ────────────────────────────────────────
 // JSON-file-backed local storage in Electron's userData directory.
 // All I/O happens in the main process; renderer accesses via IPC.
+//
+// WRITE MODEL: the store is held in memory and flushed to disk on a
+// debounced timer. Callers mutate through the exported functions and
+// call save() as before — but save() no longer touches the filesystem
+// synchronously. This matters because updateTerminalBuffer() runs on
+// every PTY data chunk (hundreds/sec during a build); doing a
+// readFileSync + JSON.parse + writeFileSync of a multi-megabyte store
+// on each one froze the main process, and with it the entire UI.
 
 import { app } from 'electron';
 import path from 'path';
@@ -27,7 +35,7 @@ export interface AgentLogEntry {
   agentId: string;
   name: string;
   providerId: string;
-  event: 'spawned' | 'hibernated' | 'woken' | 'exited' | 'error';
+  event: 'spawned' | 'hibernated' | 'woken' | 'exited' | 'error' | 'approved' | 'denied';
   timestamp: string;
   detail?: string;
 }
@@ -82,7 +90,17 @@ function ensureDir(): void {
   }
 }
 
-function load(): LocalStore {
+/** In-memory authoritative copy. Populated on first load(), mutated in
+ *  place by the exported writers, flushed to disk by scheduleFlush(). */
+let cache: LocalStore | null = null;
+let dirty = false;
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let firstDirtyAt = 0;
+
+const FLUSH_DEBOUNCE_MS = 750;   // quiet period before writing
+const FLUSH_MAX_DELAY_MS = 5000; // hard ceiling — a busy terminal must not starve the flush
+
+function readFromDisk(): LocalStore {
   ensureDir();
   try {
     const raw = fs.readFileSync(DB_FILE, 'utf-8');
@@ -117,21 +135,82 @@ function load(): LocalStore {
   }
 }
 
-function save(store: LocalStore): void {
+function load(): LocalStore {
+  if (!cache) cache = readFromDisk();
+  return cache;
+}
+
+/** Write the in-memory store to disk atomically. Synchronous by design —
+ *  it runs at most every FLUSH_DEBOUNCE_MS, and on quit it must complete. */
+function writeToDisk(store: LocalStore): void {
   ensureDir();
-  // Write atomically via temp file
   const tmp = DB_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), 'utf-8');
+  // No pretty-printing: this file is machine-read only, and indentation
+  // roughly doubles both the serialise cost and the bytes written.
+  fs.writeFileSync(tmp, JSON.stringify(store), 'utf-8');
   fs.renameSync(tmp, DB_FILE);
+}
+
+/** Mark the store dirty and schedule a debounced flush. */
+function save(store: LocalStore): void {
+  cache = store;
+  if (!dirty) {
+    dirty = true;
+    firstDirtyAt = Date.now();
+  }
+  if (flushTimer) clearTimeout(flushTimer);
+
+  // Cap the debounce so continuous writes still reach disk periodically.
+  const elapsed = Date.now() - firstDirtyAt;
+  const delay = Math.max(0, Math.min(FLUSH_DEBOUNCE_MS, FLUSH_MAX_DELAY_MS - elapsed));
+
+  flushTimer = setTimeout(flushLocalDb, delay);
+  // Never hold the event loop open just for a pending flush.
+  flushTimer.unref?.();
+}
+
+/** Force an immediate synchronous flush. Call on app quit. */
+export function flushLocalDb(): void {
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (!dirty || !cache) return;
+  try {
+    writeToDisk(cache);
+    dirty = false;
+  } catch (err) {
+    console.error('[LocalDB] Flush failed:', err);
+  }
 }
 
 // ── Public API ─────────────────────────────────────────────────────
 
 export function initLocalDb(): void {
   ensureDir();
-  const store = load();
-  save(store);
+  cache = readFromDisk();
+  rebuildTerminalIndex();
+  // Write once at boot so the file always exists in a valid state.
+  try { writeToDisk(cache); } catch (err) { console.error('[LocalDB] Init write failed:', err); }
+  dirty = false;
   console.log(`[LocalDB] Initialised at ${DB_FILE}`);
+}
+
+// ── Terminal index ─────────────────────────────────────────────────
+// updateTerminalBuffer() is the hottest write in the app. A linear
+// find() over terminalHistory on every PTY chunk is avoidable, so keep
+// a sessionId → entry map alongside the array.
+let terminalIndex = new Map<string, TerminalHistoryEntry>();
+
+function rebuildTerminalIndex(): void {
+  terminalIndex = new Map();
+  if (!cache) return;
+  for (const entry of cache.terminalHistory) terminalIndex.set(entry.sessionId, entry);
+}
+
+function findTerminal(sessionId: string): TerminalHistoryEntry | undefined {
+  if (terminalIndex.size === 0 && cache && cache.terminalHistory.length > 0) rebuildTerminalIndex();
+  return terminalIndex.get(sessionId);
 }
 
 export function getDbPath(): string {
@@ -147,7 +226,7 @@ export function recordTerminalStart(
   providerId: string,
 ): void {
   const store = load();
-  store.terminalHistory.push({
+  const entry: TerminalHistoryEntry = {
     sessionId,
     agentId,
     name,
@@ -155,10 +234,13 @@ export function recordTerminalStart(
     startedAt: new Date().toISOString(),
     charCount: 0,
     lineCount: 0,
-  });
+  };
+  store.terminalHistory.push(entry);
+  terminalIndex.set(sessionId, entry);
   // Trim oldest
   if (store.terminalHistory.length > MAX_TERMINAL_HISTORY) {
     store.terminalHistory = store.terminalHistory.slice(-MAX_TERMINAL_HISTORY);
+    rebuildTerminalIndex();
   }
   save(store);
 }
@@ -170,7 +252,7 @@ export function updateTerminalBuffer(
   lastChunk?: string,
 ): void {
   const store = load();
-  const entry = store.terminalHistory.find((e) => e.sessionId === sessionId);
+  const entry = findTerminal(sessionId);
   if (!entry) return;
   entry.charCount += charCount;
   entry.lineCount += lineCount;
@@ -193,7 +275,7 @@ export function finaliseTerminal(
   fullBuffer?: string,
 ): void {
   const store = load();
-  const entry = store.terminalHistory.find((e) => e.sessionId === sessionId);
+  const entry = findTerminal(sessionId);
   if (!entry) return;
   entry.endedAt = new Date().toISOString();
   entry.exitCode = exitCode ?? null;
@@ -326,14 +408,17 @@ export function getLocalStats(): Record<string, any> {
 
 export function resetLocalDb(): void {
   ensureDir();
-  fs.writeFileSync(DB_FILE, JSON.stringify({
+  cache = {
     terminalHistory: [],
     agentLogs: [],
     sessionEvents: [],
     settings: { workspaces: {}, preferences: {}, providers: [], mcps: [] },
     workspaces: {},
     artifacts: [],
-  }, null, 2), 'utf-8');
+  };
+  rebuildTerminalIndex();
+  writeToDisk(cache);
+  dirty = false;
 }
 
 // ── Artifact Persistence ─────────────────────────────────────────────

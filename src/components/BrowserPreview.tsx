@@ -175,21 +175,30 @@ export const BrowserPreview: React.FC = () => {
   });
 
   // ── Z-index from central stack manager ─────────────────────
-  const registry = usePanelRegistry();
+  // Narrow selectors instead of the whole registry: subscribing to the
+  // entire store re-rendered this panel on every unrelated panel move.
+  const activePanelId = usePanelRegistry((s) => s.activePanelId);
+  const dragPanelId = usePanelRegistry((s) => s.dragPanelId);
+  const resizePanelId = usePanelRegistry((s) => s.resizePanelId);
+  const zStack = usePanelRegistry((s) => s.zStack);
+  const registerPanel = usePanelRegistry((s) => s.registerPanel);
+  const unregisterPanel = usePanelRegistry((s) => s.unregisterPanel);
+  const updatePanel = usePanelRegistry((s) => s.updatePanel);
+  const focusPanel = usePanelRegistry((s) => s.focusPanel);
   const zIndex = computePanelZIndex(
     'browser',
     'canvas',
     105,
     true,
-    registry.activePanelId,
-    registry.dragPanelId,
-    registry.resizePanelId,
-    registry.zStack,
+    activePanelId,
+    dragPanelId,
+    resizePanelId,
+    zStack,
   );
 
   // ── Register with the panel registry ───────────────────────
   useEffect(() => {
-    registry.registerPanel({
+    registerPanel({
       id: 'browser',
       type: 'browser',
       space: 'canvas',
@@ -207,7 +216,7 @@ export const BrowserPreview: React.FC = () => {
       baseZIndex: 105,
       persistent: false,
     });
-    return () => { registry.unregisterPanel('browser'); };
+    return () => { unregisterPanel('browser'); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sync registry → browser store after hook commits position/size
@@ -263,7 +272,7 @@ export const BrowserPreview: React.FC = () => {
       <div
         onMouseDown={(e) => {
           e.stopPropagation();
-          registry.focusPanel('browser');
+          focusPanel('browser');
           dragHandlers.onMouseDown(e);
         }}
         style={{

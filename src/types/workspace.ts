@@ -15,6 +15,10 @@ export interface WorkspaceCanvasData {
   fillEnabled: boolean;
   fillOpacity: number;
   fontSize: number;
+  // Optional so a workspace written by an older build still loads.
+  dashStyle?: 'solid' | 'dashed' | 'dotted';
+  snapToGrid?: boolean;
+  gridSize?: number;
 }
 
 // ── Serialised app/agent state saved to .orch-workspace.json ──────

@@ -29,6 +29,7 @@ Protocol:
 import json
 import base64
 import os
+import re
 import threading
 import queue
 import time
@@ -36,6 +37,7 @@ import sys
 import numpy as np
 
 SAMPLE_RATE = 16000
+KOKORO_SAMPLE_RATE = 24000
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice-models")
 WHISPER_DIR = os.path.join(MODELS_DIR, "whisper")
 KOKORO_DIR = os.path.join(MODELS_DIR, "kokoro")
@@ -67,11 +69,20 @@ PARTIAL_EVERY_CHUNKS = 4
 # ── Helpers ─────────────────────────────────────────────────────
 
 
+_send_lock = threading.Lock()
+
+
 def send(obj):
-    """Thread-safe JSON line to stdout."""
+    """Serialise a JSON line to stdout.
+
+    Genuinely thread-safe: the STT worker, the TTS worker and the stdin
+    loop all emit concurrently, and interleaved partial writes would
+    corrupt the newline-delimited protocol the Electron side parses.
+    """
     line = json.dumps(obj, ensure_ascii=False) + "\n"
-    sys.stdout.write(line)
-    sys.stdout.flush()
+    with _send_lock:
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 def pcm_to_base64(pcm: np.ndarray) -> str:
@@ -320,15 +331,172 @@ class TtsEngine:
         except Exception as e:
             send({"event": "error", "data": f"TTS load failed: {e}"})
 
-    def speak(self, text: str, voice_id: str = "af_bella") -> bytes:
+    def speak(self, text: str, voice_id: str = "af_bella", speed: float = 1.0):
+        """Synthesize one span. Returns (pcm_bytes, sample_rate)."""
         if self.model is None:
-            return b""
+            return b"", KOKORO_SAMPLE_RATE
         try:
-            audio, sr = self.model.create(text, voice=voice_id, speed=1.0)
-            return audio.astype(np.float32).tobytes()
+            audio, sr = self.model.create(text, voice=voice_id, speed=speed)
+            return audio.astype(np.float32).tobytes(), int(sr or KOKORO_SAMPLE_RATE)
         except Exception as e:
             send({"event": "error", "data": f"TTS error: {e}"})
-            return b""
+            return b"", KOKORO_SAMPLE_RATE
+
+
+# ── Sentence chunking ───────────────────────────────────────────
+
+
+def split_for_streaming(text: str, max_chars: int = 180) -> list[str]:
+    """Split an utterance into speakable spans.
+
+    Synthesizing a long reply as one blob means the user waits for the
+    whole thing before hearing a word. Splitting on sentence boundaries
+    lets the first span start playing while the rest is still being
+    generated, which is most of the perceived latency win.
+
+    Long sentences are further split on clause boundaries so a rambling
+    sentence can't reintroduce the original stall.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    # Split after ., !, ? or a newline, keeping the punctuation.
+    raw = re.split(r"(?<=[.!?])\s+|\n+", text)
+
+    spans: list[str] = []
+    for sentence in raw:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if len(sentence) <= max_chars:
+            spans.append(sentence)
+            continue
+        # Too long — break on clause punctuation, then hard-wrap on words.
+        parts = re.split(r"(?<=[,;:])\s+", sentence)
+        buf = ""
+        for part in parts:
+            if len(buf) + len(part) + 1 <= max_chars:
+                buf = f"{buf} {part}".strip()
+            else:
+                if buf:
+                    spans.append(buf)
+                while len(part) > max_chars:
+                    cut = part.rfind(" ", 0, max_chars)
+                    if cut <= 0:
+                        cut = max_chars
+                    spans.append(part[:cut].strip())
+                    part = part[cut:].strip()
+                buf = part
+        if buf:
+            spans.append(buf)
+
+    return [s for s in spans if s]
+
+
+# ── TTS Worker ──────────────────────────────────────────────────
+
+
+class TtsWorker:
+    """Runs synthesis off the stdin loop.
+
+    Previously `tts.speak()` was called inline while reading stdin, so the
+    server was deaf for the whole duration of a synthesis: it could not
+    read incoming mic frames, and — critically — could not process the
+    `interrupt` that barge-in sends, because that interrupt was queued
+    behind the very speech it was trying to cancel. Interrupt could
+    therefore never work by construction.
+
+    Now synthesis happens on this thread and cancellation is a generation
+    counter checked between spans, so an interrupt takes effect after at
+    most one short span.
+    """
+
+    def __init__(self, tts: "TtsEngine"):
+        self.tts = tts
+        self.jobs: queue.Queue = queue.Queue()
+        self.generation = 0
+        self._lock = threading.Lock()
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def submit(self, tts_id: str, text: str, voice: str, speed: float, cached: bytes | None = None):
+        with self._lock:
+            gen = self.generation
+        self.jobs.put((gen, tts_id, text, voice, speed, cached))
+
+    def cancel(self) -> int:
+        """Invalidate queued and in-flight work. Returns the new generation."""
+        with self._lock:
+            self.generation += 1
+            gen = self.generation
+        # Drain anything already queued; in-flight work sees the new gen.
+        try:
+            while True:
+                self.jobs.get_nowait()
+        except queue.Empty:
+            pass
+        return gen
+
+    def _is_stale(self, gen: int) -> bool:
+        with self._lock:
+            return gen != self.generation
+
+    def _run(self):
+        while True:
+            job = self.jobs.get()
+            if job is None:
+                break
+            gen, tts_id, text, voice, speed, cached = job
+            if self._is_stale(gen):
+                continue
+            try:
+                self._speak_job(gen, tts_id, text, voice, speed, cached)
+            except Exception as e:
+                send({"event": "error", "data": f"TTS worker error: {e}"})
+
+    def _speak_job(self, gen, tts_id, text, voice, speed, cached):
+        # Pre-rendered ack clip — emit immediately, nothing to synthesize.
+        if cached is not None:
+            send({
+                "event": "audio",
+                "id": tts_id,
+                "seq": 0,
+                "final": True,
+                "sampleRate": KOKORO_SAMPLE_RATE,
+                "data": base64.b64encode(cached).decode(),
+            })
+            send({"event": "done", "id": tts_id})
+            return
+
+        spans = split_for_streaming(text)
+        if not spans:
+            send({"event": "done", "id": tts_id})
+            return
+
+        for i, span in enumerate(spans):
+            if self._is_stale(gen):
+                send({"event": "status", "data": f"TTS cancelled at span {i}"})
+                return
+            pcm_bytes, sr = self.tts.speak(span, voice_id=voice, speed=speed)
+            # Re-check after synthesis: an interrupt may have landed while
+            # this span was rendering, and playing it would talk over the user.
+            if self._is_stale(gen):
+                send({"event": "status", "data": f"TTS cancelled after span {i}"})
+                return
+            if not pcm_bytes:
+                continue
+            send({
+                "event": "audio",
+                "id": tts_id,
+                "seq": i,
+                "final": i == len(spans) - 1,
+                "sampleRate": sr,
+                "data": base64.b64encode(pcm_bytes).decode(),
+            })
+
+        send({"event": "done", "id": tts_id})
 
 
 # ── VoiceProcessor ──────────────────────────────────────────────
@@ -339,6 +507,11 @@ class VoiceProcessor:
         self.vad_model = None
         self.stt = SttEngine()
         self.tts = TtsEngine()
+        self.tts_worker = TtsWorker(self.tts)
+
+        # Voice settings — overridable at runtime via the "config" event.
+        self.voice_id = "af_bella"
+        self.voice_speed = 1.0
 
         # Audio thread state
         self.audio_queue: queue.Queue = queue.Queue()
@@ -510,9 +683,19 @@ class VoiceProcessor:
         send({"event": "ready"})
         send({"event": "status", "data": f"Voice ready — {self.stt.engine_name} STT loaded, TTS loading in background"})
 
-        # Wait for TTS
-        tts_thread.join()
-        send({"event": "status", "data": "All models ready, voice pipeline fully operational"})
+        # Start the TTS worker and enter the command loop immediately.
+        # Joining tts_thread here (as before) meant the server accepted no
+        # commands until Kokoro had loaded and cached every ack phrase —
+        # while having already told the renderer it was "ready", so mic
+        # frames piled up unread in the stdin pipe.
+        self.tts_worker.start()
+
+        def announce_tts_ready():
+            tts_thread.join()
+            send({"event": "status", "data": "All models ready, voice pipeline fully operational"})
+            send({"event": "tts_ready"})
+
+        threading.Thread(target=announce_tts_ready, daemon=True).start()
 
         # ── stdin command loop ──────────────────────────────
         line_buffer = ""
@@ -545,38 +728,36 @@ class VoiceProcessor:
                         tts_id = cmd.get("id", "0")
                         text = cmd.get("text", "")
                         if text:
-                            send({"event": "status", "data": f"Speaking: {text[:40]}...", "level": 0})
-                            pcm_bytes = self.tts.speak(text)
-                            if pcm_bytes:
-                                send({
-                                    "event": "audio",
-                                    "id": tts_id,
-                                    "data": base64.b64encode(pcm_bytes).decode(),
-                                })
-                            send({"event": "done", "id": tts_id})
+                            self.tts_worker.submit(
+                                tts_id, text,
+                                cmd.get("voice") or self.voice_id,
+                                float(cmd.get("speed") or self.voice_speed),
+                            )
 
                     elif event == "ack":
                         ack_id = cmd.get("id", "ack")
                         phrase = cmd.get("phrase", "On it")
-                        cached = get_cached_ack(phrase)
-                        if cached:
-                            send({
-                                "event": "audio",
-                                "id": ack_id,
-                                "data": base64.b64encode(cached).decode(),
-                            })
-                            send({"event": "done", "id": ack_id})
-                        else:
-                            pcm_bytes = self.tts.speak(phrase)
-                            if pcm_bytes:
-                                send({
-                                    "event": "audio",
-                                    "id": ack_id,
-                                    "data": base64.b64encode(pcm_bytes).decode(),
-                                })
-                            send({"event": "done", "id": ack_id})
+                        # Cached acks skip synthesis entirely; uncached ones
+                        # go through the worker like any other utterance.
+                        self.tts_worker.submit(
+                            ack_id, phrase,
+                            cmd.get("voice") or self.voice_id,
+                            float(cmd.get("speed") or self.voice_speed),
+                            cached=get_cached_ack(phrase),
+                        )
+
+                    elif event == "config":
+                        if cmd.get("voice"):
+                            self.voice_id = str(cmd["voice"])
+                        if cmd.get("speed"):
+                            self.voice_speed = max(0.5, min(2.0, float(cmd["speed"])))
+                        send({"event": "status",
+                              "data": f"Voice config: {self.voice_id} @ {self.voice_speed}x"})
 
                     elif event == "interrupt":
+                        # Cancel speech first so the user stops hearing the
+                        # assistant within one span, then reset capture state.
+                        self.tts_worker.cancel()
                         with self.audio_queue.mutex:
                             self.audio_queue.queue.clear()
                         self.audio_queue.put(None)
@@ -584,6 +765,7 @@ class VoiceProcessor:
                         self._vad_hold_count = 0
                         self.segment_buffer = bytearray()
                         self._partial_sent_pos = 0
+                        send({"event": "interrupted"})
                         send({"event": "status", "data": "Interrupted"})
 
                     elif event == "ping":

@@ -1,7 +1,10 @@
 import React, { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { AgentCard } from './AgentCard';
 import { useAppStore } from '../stores/useAppStore';
-import { useCanvasStore } from '../stores/useCanvasStore';
+import {
+  useCanvasStore, makeElementId,
+  type CanvasElement, type CanvasTool as CanvasToolName,
+} from '../stores/useCanvasStore';
 import { useWorkspaceStore } from '../stores/useWorkspaceStore';
 import { DrawingLayer } from './DrawingLayer';
 import { VectorLayer } from './VectorLayer';
@@ -9,9 +12,12 @@ import { CanvasToolbar } from './CanvasToolbar';
 import { CanvasTextNotes, CanvasImages } from './CanvasElements';
 import { CanvasPropertiesPanel } from './CanvasPropertiesPanel';
 import { EraserOverlay } from './EraserOverlay';
-import { invoke } from '../lib/electron-api';
+import { elementsInRect } from '../lib/canvas-geometry';
+import { CanvasSelectionLayer } from './CanvasSelectionLayer';
+import { saveCanvasAsset, type SavedAsset } from '../lib/electron-api';
 import { Z_BASE_LAYERS } from '../lib/z-stack-manager';
-import { frameViewport, computeBBoxFromPanels } from '../lib/layout-engine';
+import { frameViewport } from '../lib/layout-engine';
+import { boundingBox } from '../lib/layout-modes';
 import { usePanelRegistry } from '../stores/usePanelRegistry';
 import { useMusicPlayerStore } from '../stores/useMusicPlayerStore';
 import { useBrowserStore } from '../stores/useBrowserStore';
@@ -19,6 +25,13 @@ import { MusicPlayer } from './MusicPlayer';
 import { BrowserPreview } from './BrowserPreview';
 import ForgeNode from './ForgeNode';
 import BugReporter from './BugReporter';
+
+// Zoom limits live in one place: the wheel, the buttons and pinch each
+// clamped to a different range, so the buttons refused to go below 0.25
+// while the wheel happily reached 0.1 and then could not be undone.
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 5;
+const clampZoom = (z: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
 
 const MINIMAP_W = 190;
 const MINIMAP_H = 130;
@@ -43,6 +56,49 @@ function computeArrowhead(x1: number, y1: number, x2: number, y2: number, size: 
   const rightX = tipX - size * Math.cos(angle + Math.PI / 6);
   const rightY = tipY - size * Math.sin(angle + Math.PI / 6);
   return `${tipX},${tipY} ${leftX},${leftY} ${rightX},${rightY}`;
+}
+
+
+/**
+ * Build a canvas node for a saved image.
+ *
+ * `src` MUST be the orch-asset:// URL, never `file://` — the renderer
+ * blocks file:// for its own content, so the previous version produced
+ * nodes that could never load and fell through to a generic file card.
+ */
+function makeImageElement(
+  asset: SavedAsset,
+  name: string,
+  x: number,
+  y: number,
+): CanvasElement {
+  return {
+    id: `img_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+    type: 'image',
+    src: asset.url,
+    alt: name,
+    text: name,
+    x, y,
+    // Placeholder box; CanvasMediaNode measures the real image on load and
+    // resizes to its true aspect ratio.
+    width: 320,
+    height: 200,
+    strokeColor: 'transparent',
+    strokeWidth: 0,
+    // Paint order is an ordinal, not a timestamp. Date.now() here put
+    // every agent-created node ~1.8e12 above the rest, so they always
+    // outranked user content and sendToBack had to go absurdly
+    // negative to get beneath them.
+    zIndex: useCanvasStore.getState().nextZIndex(),
+    createdAt: Date.now(),
+    fileMeta: {
+      path: asset.path ?? '',
+      kind: 'image',
+      ext: asset.ext ?? 'png',
+      sizeBytes: asset.sizeBytes ?? 0,
+      producedBy: 'user',
+    },
+  };
 }
 
 export const InfiniteCanvas: React.FC = () => {
@@ -201,7 +257,7 @@ export const InfiniteCanvas: React.FC = () => {
       const mouseX = e.clientX - rect.left;
       const mouseY = e.clientY - rect.top;
       setZoom((prevZoom) => {
-        const newZoom = Math.min(5, Math.max(0.1, prevZoom * (e.deltaY > 0 ? 0.9 : 1.1)));
+        const newZoom = clampZoom(prevZoom * (e.deltaY > 0 ? 0.9 : 1.1));
         setPan((prev) => ({
           x: mouseX - (mouseX - prev.x) * (newZoom / prevZoom),
           y: mouseY - (mouseY - prev.y) * (newZoom / prevZoom),
@@ -281,14 +337,15 @@ export const InfiniteCanvas: React.FC = () => {
         const y1 = Math.min(start.y, current.y);
         const x2 = Math.max(start.x, current.x);
         const y2 = Math.max(start.y, current.y);
-        // Find elements inside the selection box (AABB overlap)
-        const selected = store.elements.filter((el) => {
-          const ex = el.x ?? 0;
-          const ey = el.y ?? 0;
-          const ew = el.width ?? 40;
-          const eh = el.height ?? 20;
-          return ex < x2 && ex + ew > x1 && ey < y2 && ey + eh > y1;
-        });
+        // Real bounds per element type. Reading x/y/width/height
+        // straight off the element treated every freehand stroke as a
+        // 40x20 box at the origin — so a lasso near 0,0 grabbed every
+        // stroke on the canvas and a lasso over an actual stroke
+        // grabbed none.
+        const selected = elementsInRect(
+          store.elements.filter((el) => !el.locked),
+          { x: x1, y: y1, width: x2 - x1, height: y2 - y1 },
+        );
         store.setSelectedElementIds(selected.map((el) => el.id));
         store.setSelectionBox(null);
       }
@@ -321,18 +378,24 @@ export const InfiniteCanvas: React.FC = () => {
       if (rect) {
         const cx = (e.clientX - rect.left - pan.x) / zoom;
         const cy = (e.clientY - rect.top - pan.y) / zoom;
+        // Empty, with the caret already in it. Dropping a literal
+        // "Type here" placeholder and leaving the user to discover that
+        // a double-click edits it is two steps too many.
+        const id = makeElementId('txt');
         store.addElement({
-          id: `txt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          id,
           type: 'text',
-          text: 'Type here',
+          text: '',
           x: cx, y: cy,
+          width: 260,
           fontSize: store.fontSize || 14,
-          strokeColor: '#EAF4F4',
+          strokeColor: store.strokeColor || '#EAF4F4',
           strokeWidth: 0,
-          zIndex: store.elements.length,
+          zIndex: store.nextZIndex(),
           createdAt: Date.now(),
         });
         store.setActiveTool('select');
+        store.setEditingElement(id);
       }
       return;
     }
@@ -422,20 +485,10 @@ export const InfiniteCanvas: React.FC = () => {
           const reader = new FileReader();
           reader.onload = async () => {
             const b64 = (reader.result as string).split(',')[1];
-            const result = await invoke<{ success: boolean; path: string }>('save_canvas_asset', { data: b64, ext: 'png' });
-            if (result.success) {
-              store.addElement({
-                id: `img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                type: 'image',
-                src: `file://${result.path}`,
-                alt: file.name,
-                x: cx, y: cy,
-                width: 200,
-                strokeColor: 'transparent',
-                strokeWidth: 0,
-                zIndex: store.elements.length,
-                createdAt: Date.now(),
-              });
+            const ext = (file.name?.split('.').pop() || 'png').toLowerCase();
+            const result = await saveCanvasAsset(b64, ext);
+            if (result.success && result.url) {
+              store.addElement(makeImageElement(result, file.name || 'Pasted image', cx, cy));
             }
           };
           reader.readAsDataURL(file);
@@ -484,7 +537,7 @@ export const InfiniteCanvas: React.FC = () => {
       const dy = e.touches[0].clientY - e.touches[1].clientY;
       const dist = Math.sqrt(dx * dx + dy * dy);
       if (touchRef.current.dist > 0) {
-        setZoom(Math.min(Math.max(touchRef.current.zoom * (dist / touchRef.current.dist), 0.1), 5));
+        setZoom(clampZoom(touchRef.current.zoom * (dist / touchRef.current.dist)));
       }
     }
   }, []);
@@ -492,7 +545,7 @@ export const InfiniteCanvas: React.FC = () => {
   // ── Center-anchored zoom (keeps viewport stable, no jump to origin) ──
   const zoomToCenter = useCallback((factor: number) => {
     setZoom((prevZoom) => {
-      const nextZoom = Math.min(5, Math.max(0.25, +(prevZoom * factor).toFixed(2)));
+      const nextZoom = clampZoom(+(prevZoom * factor).toFixed(2));
       setPan((prevPan) => {
         const cx = window.innerWidth / 2;
         const cy = window.innerHeight / 2;
@@ -513,7 +566,7 @@ export const InfiniteCanvas: React.FC = () => {
       x: a.x, y: a.y,
       width: a.width ?? 520, height: a.height ?? 360,
     }));
-    const bbox = computeBBoxFromPanels(panels);
+    const bbox = boundingBox(panels);
     const { pan, zoom } = frameViewport(bbox, winSize.w, winSize.h);
     setZoom(zoom);
     setPan(pan);
@@ -644,36 +697,110 @@ export const InfiniteCanvas: React.FC = () => {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // ── P/O/T → canvas tools; Delete/Backspace → remove selected ────────────
+  // ── Canvas tools and element commands ──────────────────────────────────
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const key = e.key.toLowerCase();
-      // Don't capture if focus is inside an input/textarea
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
+    /** True while the user is typing somewhere a keystroke belongs. */
+    const isTyping = (t: EventTarget | null): boolean => {
+      const el = t as HTMLElement | null;
+      if (!el) return false;
+      const tag = el.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+    };
 
-      if (key === 'p') {
-        e.preventDefault();
-        useCanvasStore.getState().setActiveTool('pen');
-      } else if (key === 'o') {
-        e.preventDefault();
-        useCanvasStore.getState().setActiveTool('shape');
-      } else if (key === 't') {
-        e.preventDefault();
-        useCanvasStore.getState().setActiveTool('text');
-      } else if (key === 'delete' || key === 'backspace') {
-        const store = useCanvasStore.getState();
-        if (store.selectedElementIds.length > 0) {
+    const onKey = (e: KeyboardEvent) => {
+      if (isTyping(e.target)) return;
+      const store = useCanvasStore.getState();
+      const key = e.key.toLowerCase();
+      const mod = e.ctrlKey || e.metaKey;
+
+      if (mod && !e.altKey) {
+        if (key === 'a') {
           e.preventDefault();
-          const ids = [...store.selectedElementIds];
-          ids.forEach((id) => store.removeElement(id));
-          store.clearSelection();
+          store.selectAll();
+          return;
         }
+        if (key === 'd') {
+          e.preventDefault();
+          store.duplicateElements(store.selectedElementIds);
+          return;
+        }
+        // Ctrl+Z / Ctrl+Shift+Z are handled by the undo effect above.
+        return;
+      }
+      if (e.altKey) return;
+
+      // Space holds the hand tool for as long as it is down — the
+      // pan gesture every canvas app has, and the reason select mode
+      // no longer needs to steal the left button.
+      if (e.code === 'Space' && !e.repeat) {
+        e.preventDefault();
+        if (store.activeTool !== 'hand') store.setActiveTool('hand');
+        return;
+      }
+
+      const TOOL_KEYS: Record<string, CanvasToolName> = {
+        v: 'select', h: 'hand', p: 'pen', b: 'pen',
+        o: 'shape', r: 'shape', t: 'text', e: 'eraser',
+      };
+      if (TOOL_KEYS[key]) {
+        e.preventDefault();
+        // R and O both reach for the shape tool; make them pick the
+        // shape they are named after rather than whatever was last used.
+        if (key === 'r') store.setActiveShapeType('rect');
+        if (key === 'o') store.setActiveShapeType('ellipse');
+        store.setActiveTool(TOOL_KEYS[key]);
+        return;
+      }
+
+      const ids = store.selectedElementIds;
+
+      if (key === 'delete' || key === 'backspace') {
+        if (ids.length === 0) return;
+        e.preventDefault();
+        // One call, one undo entry. Looping removeElement pushed a
+        // separate snapshot per element, so undoing a multi-delete took
+        // as many presses as there were elements.
+        store.removeElements(ids);
+        return;
+      }
+
+      if (key === 'escape') {
+        store.clearSelection();
+        return;
+      }
+
+      if (key === '[' || key === ']') {
+        if (ids.length === 0) return;
+        e.preventDefault();
+        if (key === ']') store.bringToFront(ids); else store.sendToBack(ids);
+        return;
+      }
+
+      const NUDGE: Record<string, [number, number]> = {
+        arrowleft: [-1, 0], arrowright: [1, 0], arrowup: [0, -1], arrowdown: [0, 1],
+      };
+      const dir = NUDGE[key];
+      if (dir && ids.length > 0) {
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : store.snapToGrid ? store.gridSize : 1;
+        store.moveElements(ids, dir[0] * step, dir[1] * step);
       }
     };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      const store = useCanvasStore.getState();
+      if (store.activeTool === 'hand') {
+        store.setActiveTool(store.previousTool === 'hand' ? 'select' : store.previousTool);
+      }
+    };
+
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKeyUp);
+    };
   }, []);
 
   const handleMinimapClick = useCallback((e: React.MouseEvent) => {
@@ -723,7 +850,10 @@ export const InfiniteCanvas: React.FC = () => {
       {/* Panning background — z-index 1, below agents at z-index 10 */}
       <div
         style={{
-          position: 'absolute', inset: 0, zIndex: 1, cursor: isPanning ? 'grabbing' : isShiftPanning ? 'grab' : 'default',
+          position: 'absolute', inset: 0, zIndex: 1,
+          cursor: isPanning ? 'grabbing'
+            : (isShiftPanning || activeTool === 'hand') ? 'grab'
+            : 'default',
         }}
         onMouseDown={handleCanvasMouseDown}
         onTouchStart={handleTouchStart}
@@ -843,7 +973,7 @@ export const InfiniteCanvas: React.FC = () => {
         transformOrigin: '0 0',
         zIndex: Z_BASE_LAYERS.canvasElements, pointerEvents: 'none',
       }}>
-        <CanvasTextNotes />
+        <CanvasTextNotes zoom={zoom} />
         {/* Selection rectangle */}
         {selectionBox && (() => {
           const x = Math.min(selectionBox.x1, selectionBox.x2);
@@ -863,10 +993,30 @@ export const InfiniteCanvas: React.FC = () => {
           );
         })()}
       </div>
-      {/* Dropped images — below everything */}
-      <div style={{ position: 'absolute', inset: 0, zIndex: Z_BASE_LAYERS.canvasImages, pointerEvents: 'none' }}>
-        <CanvasImages />
+      {/* Media nodes — in world space, like every other element.
+          This wrapper had no transform, so a pasted image sat in screen
+          coordinates: it stayed put while the canvas panned under it,
+          and its stored x/y meant nothing. */}
+      <div style={{
+        position: 'absolute', inset: 0, overflow: 'visible',
+        transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+        transformOrigin: '0 0',
+        zIndex: Z_BASE_LAYERS.canvasImages, pointerEvents: 'none',
+      }}>
+        <CanvasImages zoom={zoom} />
       </div>
+
+      {/* Select / move / resize / rotate for shapes and strokes.
+          Its hit surface sits under the cards and notes, so anything
+          they do not consume is tested against canvas geometry, and
+          empty space falls through to the pan-and-lasso handler. */}
+      <CanvasSelectionLayer
+        pan={pan}
+        zoom={zoom}
+        onBackgroundMouseDown={handleCanvasMouseDown}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+      />
 
       {/* Eraser overlay — appears above all elements when eraser tool active */}
       <EraserOverlay pan={pan} zoom={zoom} />
@@ -1041,20 +1191,10 @@ export const InfiniteCanvas: React.FC = () => {
                 const reader = new FileReader();
                 reader.onload = async () => {
                   const b64 = (reader.result as string).split(',')[1];
-                  const result = await invoke<{ success: boolean; path: string }>('save_canvas_asset', { data: b64, ext: 'png' });
-                  if (result.success) {
-                    addElement({
-                      id: `img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                      type: 'image',
-                      src: `file://${result.path}`,
-                      alt: file.name,
-                      x: cx, y: cy,
-                      width: 200,
-                      strokeColor: 'transparent',
-                      strokeWidth: 0,
-                      zIndex: useCanvasStore.getState().elements.length,
-                      createdAt: Date.now(),
-                    });
+                  const ext = (file.name.split('.').pop() || 'png').toLowerCase();
+                  const result = await saveCanvasAsset(b64, ext);
+                  if (result.success && result.url) {
+                    addElement(makeImageElement(result, file.name, cx, cy));
                   }
                 };
                 reader.readAsDataURL(file);

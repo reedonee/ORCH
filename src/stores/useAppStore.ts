@@ -22,6 +22,28 @@ export interface Agent {
   color: string;
 }
 
+export interface Toast {
+  id: string;
+  text: string;
+  tone: 'info' | 'success' | 'warn' | 'error';
+  createdAt: number;
+}
+
+/** What an agent reports it is doing, mirrored from the main-process mesh. */
+export interface AgentReport {
+  agentId: string;
+  name: string;
+  providerId: string;
+  phase: 'idle' | 'working' | 'blocked' | 'done' | 'failed';
+  task: string;
+  detail?: string;
+  progress?: number;
+  files: string[];
+  tags: string[];
+  updatedAt: number;
+  startedAt: number;
+}
+
 export interface DelegationLink {
   id: string;
   fromAgentId: string;
@@ -45,6 +67,11 @@ interface AppState {
   isLoading: boolean;
   coordinatorActive: boolean;
   selectedAgentId: string | null;
+  /** The agent the user chose to coordinate the others (main process
+   *  owns it; this mirrors controller_changed). */
+  controllerAgentId: string | null;
+  /** Which agents currently hold an MCP session with ORCH. */
+  mcpConnections: Record<string, { connected: boolean; client?: string }>;
 
   delegationLinks: DelegationLink[];
 
@@ -57,6 +84,15 @@ interface AppState {
 
   // Focus target — canvas watches this and pans to it, then nulls it
   focusTarget: { x: number; y: number; zoom: number } | null;
+
+  /** When true every agent card turns around to show its status summary. */
+  flipView: boolean;
+
+  /** Live self-reported status per agent, keyed by agentId. */
+  agentReports: Record<string, AgentReport>;
+
+  /** Transient messages shown to the user. */
+  toasts: Toast[];
 
   // Programmatic viewport request — the layout engine pushes its computed
   // framing here; the canvas subscribes and applies it (one-shot, then nulls).
@@ -76,6 +112,10 @@ interface AppState {
   removeMcpServer: (id: string) => void;
   setCoordinatorActive: (active: boolean) => void;
   toggleCoordinator: () => Promise<void>;
+  /** Make an agent the controller, or clear it with null. */
+  setController: (agentId: string | null) => Promise<boolean>;
+  setControllerFromMain: (agentId: string | null) => void;
+  setMcpConnection: (agentId: string, info: { connected: boolean; client?: string }) => void;
   setSelectedAgent: (id: string | null) => void;
   setViewport: (pan: { x: number; y: number }, zoom: number, winSize: { w: number; h: number }) => void;
   /** Engine-driven framing request (consumed once by the canvas) */
@@ -83,6 +123,18 @@ interface AppState {
   clearViewportFrame: () => void;
   focusOnAgent: (agent: { x: number; y: number; width?: number; height?: number; id: string }) => void;
   clearFocusTarget: () => void;
+
+  setFlipView: (v: boolean) => void;
+  toggleFlipView: () => void;
+  setAgentReport: (report: AgentReport) => void;
+  clearAgentReport: (agentId: string) => void;
+  pushToast: (t: { text: string; tone?: Toast['tone'] }) => void;
+  dismissToast: (id: string) => void;
+  /** Files this agent shares with another currently-working agent.
+   *  NOTE: returns a fresh array — never call this directly inside a
+   *  zustand selector or the new reference will re-render on every store
+   *  update. Subscribe to `agentReports` and derive with useMemo. */
+  fileConflictsFor: (agentId: string) => string[];
   // Delegation links
   addDelegationLink: (link: DelegationLink) => void;
   updateDelegationLink: (id: string, updates: Partial<DelegationLink>) => void;
@@ -107,7 +159,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   isLoading: false,
   coordinatorActive: false,
   selectedAgentId: null,
+  controllerAgentId: null,
+  mcpConnections: {},
   delegationLinks: [],
+  flipView: false,
+  agentReports: {},
+  toasts: [],
   mcpServers: [],
   viewportPan: { x: 0, y: 0 },
   viewportZoom: 1,
@@ -246,6 +303,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  setController: async (agentId) => {
+    const res = await invoke<{ success: boolean }>('controller_set', { agentId }).catch(() => ({ success: false }));
+    if (res.success) set({ controllerAgentId: agentId, coordinatorActive: !!agentId });
+    return res.success;
+  },
+
+  setControllerFromMain: (agentId) => set({ controllerAgentId: agentId, coordinatorActive: !!agentId }),
+
+  setMcpConnection: (agentId, info) => set((s) => ({
+    mcpConnections: { ...s.mcpConnections, [agentId]: info },
+  })),
+
   setSelectedAgent: (id) => set({ selectedAgentId: id }),
 
   setViewport: (pan, zoom, winSize) => set({ viewportPan: pan, viewportZoom: zoom, viewportWinSize: winSize }),
@@ -276,6 +345,47 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   clearFocusTarget: () => set({ focusTarget: null }),
+
+  setFlipView: (v) => set({ flipView: v }),
+  toggleFlipView: () => set((s) => ({ flipView: !s.flipView })),
+
+  setAgentReport: (report) => set((s) => ({
+    agentReports: { ...s.agentReports, [report.agentId]: report },
+  })),
+
+  clearAgentReport: (agentId) => set((s) => {
+    const { [agentId]: _drop, ...rest } = s.agentReports;
+    return { agentReports: rest };
+  }),
+
+  pushToast: ({ text, tone = 'info' }) => {
+    const toast: Toast = {
+      id: `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      text, tone, createdAt: Date.now(),
+    };
+    set((s) => ({ toasts: [...s.toasts, toast].slice(-5) }));
+    // Auto-dismiss. Errors linger longer because they usually need action.
+    const ttl = tone === 'error' ? 8000 : 4000;
+    setTimeout(() => {
+      useAppStore.setState((s) => ({ toasts: s.toasts.filter((t) => t.id !== toast.id) }));
+    }, ttl);
+  },
+
+  dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+
+  // Mirrors AgentMesh.fileConflicts() on the renderer side so a card can
+  // show its own collisions without a round-trip to the main process.
+  fileConflictsFor: (agentId) => {
+    const reports = Object.values(get().agentReports);
+    const mine = reports.find((r) => r.agentId === agentId);
+    if (!mine || mine.phase !== 'working') return [];
+    const others = reports.filter((r) => r.agentId !== agentId && r.phase === 'working');
+    // Normalise separators so the Windows and POSIX spellings of one path
+    // are recognised as the same file.
+    const norm = (f: string) => f.split('\\').join('/').toLowerCase();
+    const theirs = new Set(others.flatMap((r) => r.files.map(norm)));
+    return mine.files.filter((f) => theirs.has(norm(f)));
+  },
 
   // ── Delegation links ─────────────────────────────────────────
   addDelegationLink: (link) =>
