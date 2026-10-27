@@ -13,6 +13,7 @@ import { computePanelZIndex } from '../lib/z-stack-manager';
 import { BUILTIN_PROVIDERS } from '../types/settings';
 import { X, Minus, Maximize2, RefreshCw, Moon, ShieldAlert, ShieldCheck, Shield, Crown } from 'lucide-react';
 import { useApprovalStore } from '../stores/useApprovalStore';
+import { useLatestRef } from '../lib/use-latest-ref';
 
 /** Providers whose permission prompts ORCH recognises (mirrors
  *  APPROVAL_PROVIDERS in electron/agent-approvals.ts). */
@@ -28,6 +29,17 @@ const EMPTY_CONFLICTS: string[] = [];
 
 const DEFAULT_W = 520;
 const DEFAULT_H = 360;
+/** One flip, start to finish. Long enough to read as a turn, short
+ *  enough to never feel like waiting. */
+const FLIP_MS = 820;
+/** One unbroken ease-in-out arc: gentle start, fastest edge-on, settles
+ *  without overshoot. */
+const FLIP_EASE = 'cubic-bezier(0.65, 0, 0.35, 1)';
+/** Depth for the turn, baked into each face's own transform. Not closer:
+ *  at 1800px the near edge is magnified enough that Chromium re-rasters
+ *  the face mid-turn, stalling presentation ~120 ms at edge-on (traced);
+ *  from 4000px it presents every frame. Must match globals.css. */
+const FLIP_PERSPECTIVE = 'perspective(4000px)';
 
 interface AgentCardProps {
   agent: Agent;
@@ -45,20 +57,32 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
   const cardBlur = useSettingsStore((s) => s.cardBlur);
   const reduceMotion = useSettingsStore((s) => s.reduceMotion);
   const flipView = useAppStore((s) => s.flipView);
-  // True from the start of a flip until the card has turned back to its
-  // front; the card is flat (and its text crisp) the rest of the time.
-  const [flip3d, setFlip3d] = useState(flipView);
+  // Flip phases. 'rest': flat, text crisp. 'anim': turning or face-down.
+  // Between them, for two frames, the card PREPARES: it becomes a 3D layer
+  // and its back face is painted before any motion starts. Doing that work
+  // on the first frame of the turn (and painting the back the moment it
+  // swung into view, edge-on) is what made the flip stutter.
+  const [flipPhase, setFlipPhase] = useState<'rest' | 'anim'>(flipView ? 'anim' : 'rest');
+  const preparing = flipView && flipPhase === 'rest' && !reduceMotion;
+  const flipViewRef = useLatestRef(flipView);
   useEffect(() => {
-    if (flipView) setFlip3d(true);
-    else if (reduceMotion) setFlip3d(false);
-  }, [flipView, reduceMotion]);
-  const in3d = flipView || flip3d;
+    let r1 = 0, r2 = 0;
+    if (flipView && flipPhase === 'rest') {
+      r1 = requestAnimationFrame(() => {
+        r2 = requestAnimationFrame(() => { if (flipViewRef.current) setFlipPhase('anim'); });
+      });
+    } else if (!flipView && flipPhase === 'anim' && reduceMotion) {
+      r1 = requestAnimationFrame(() => setFlipPhase('rest'));
+    }
+    return () => { cancelAnimationFrame(r1); cancelAnimationFrame(r2); };
+  }, [flipView, flipPhase, reduceMotion, flipViewRef]);
+  const in3d = preparing || flipPhase === 'anim';
   // Position in the flip wave: cards turn one after another, left to right.
   const flipOrder = useAppStore((s) => {
     const sorted = [...s.agents].sort((a, b) => a.x - b.x || a.y - b.y);
     return sorted.findIndex((a) => a.id === agent.id);
   });
-  const flipDelay = Math.min(Math.max(flipOrder, 0) * 55, 330);
+  const flipDelay = Math.min(Math.max(flipOrder, 0) * 40, 240);
   const report = useAppStore((s) => s.agentReports[agent.id]);
   // NOT `useAppStore((s) => s.fileConflictsFor(agent.id))`: that selector
   // builds a NEW array on every call, so zustand sees a changed reference
@@ -214,10 +238,6 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
         boxSizing: 'border-box',
         zIndex,
         cursor: isDragging ? 'grabbing' : isResizing ? 'nwse-resize' : 'default',
-        // Depth for the flip. Without perspective a rotateY reads as the
-        // card squashing flat, not turning over. Only while 3D, so a
-        // resting card is never a 3D layer (that is what blurred its text).
-        perspective: in3d ? 1800 : undefined,
       }}
     >
       {/* Flip container. The back face is mounted while flipped so the
@@ -229,21 +249,28 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
           composited layer, which the browser rasterises once and then
           stretches when the canvas zooms: card text went soft, worst
           while zooming. Flat at rest, text is redrawn at every zoom. */}
+      {/* Lift: the card swells slightly toward the viewer as it turns and
+          settles as it lands. Its own element and its own 2D transform
+          animation, so it never interrupts the turn (see globals.css). */}
       <div
-        onAnimationEnd={(e) => {
-          if (e.target === e.currentTarget && !flipView) setFlip3d(false);
-        }}
+        data-flip-lift
         style={{
           width: '100%', height: '100%', position: 'relative',
-          transformStyle: in3d ? 'preserve-3d' : 'flat',
-          // Keyframed rather than a plain transition: the card lifts and
-          // dips through the turn, and cards flip in a left-to-right wave
-          // (flipDelay) instead of all at once.
-          transform: in3d && reduceMotion ? (flipView ? 'rotateY(180deg)' : 'none') : undefined,
-          animation: in3d && !reduceMotion
-            ? `${flipView ? 'orch-flip-to-back' : 'orch-flip-to-front'} 680ms cubic-bezier(0.2, 0.8, 0.2, 1) ${flipDelay}ms both`
+          animation: flipPhase === 'anim' && !reduceMotion
+            ? `orch-flip-lift ${FLIP_MS}ms ease-in-out ${flipDelay}ms both`
             : undefined,
+          willChange: in3d ? 'transform' : undefined,
         }}
+      >
+      {/* The two faces turn independently, each with perspective() in its
+          own transform: front 0° → 180°, back −180° → 0° in lockstep, each
+          hidden while facing away. No shared preserve-3d scene: two
+          coplanar faces in one 3D context made Chromium depth-sort and
+          split them on the GPU every frame, which stalled presentation
+          for 50-150 ms per flip. */}
+      <div
+        data-flip-turn
+        style={{ width: '100%', height: '100%', position: 'relative' }}
       >
       <GlassPanel
         accent={agent.id === selectedAgentId}
@@ -292,6 +319,13 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
           zIndex: 0,
           backfaceVisibility: in3d ? 'hidden' : undefined,
           WebkitBackfaceVisibility: in3d ? 'hidden' : undefined,
+          transform: preparing
+            ? `${FLIP_PERSPECTIVE} rotateY(0deg)`
+            : flipPhase === 'anim' && reduceMotion && flipView ? `${FLIP_PERSPECTIVE} rotateY(180deg)` : undefined,
+          animation: flipPhase === 'anim' && !reduceMotion
+            ? `${flipView ? 'orch-face-front-away' : 'orch-face-front-return'} ${FLIP_MS}ms ${FLIP_EASE} ${flipDelay}ms both`
+            : undefined,
+          willChange: in3d ? 'transform' : undefined,
           // Chromium hit-tests the turned-away front even with its
           // backface hidden, so clicks meant for the back landed here.
           pointerEvents: flipView ? 'none' : undefined,
@@ -430,7 +464,7 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
             <ShieldAlert size={14} style={{ color: 'var(--warning)', flexShrink: 0 }} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {approval.kind === 'trust' ? 'Trust this folder?' : 'Needs approval'}
+                {approval.kind === 'trust' ? 'Trust this folder? ORCH will remember it' : 'Needs approval'}
               </div>
               <div
                 title={approval.detail}
@@ -552,18 +586,34 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
         </div>
       </GlassPanel>
 
-        {/* Back face — rotated into place, only present while 3D.
-            Clicking it flips every card back over. */}
+        {/* Back face. Always laid out, so a flip never starts by building
+            it — that layout-and-paint spike landed on the first frame of
+            every flip. At rest it is invisible and flat (no 3D layer, no
+            effect on text sharpness); it is rotated into place only while
+            3D. Clicking it flips every card back over. */}
         <div
           onClick={() => window.dispatchEvent(new Event('orch-flip-back'))}
+          onAnimationEnd={(e) => {
+            if (e.target === e.currentTarget && e.animationName === 'orch-face-back-away' && !flipView) setFlipPhase('rest');
+          }}
           title="Click to flip back"
           style={{
-            display: in3d ? undefined : 'none',
+            visibility: in3d ? 'visible' : 'hidden',
             cursor: 'pointer',
             position: 'absolute', inset: 0,
-            transform: 'rotateY(180deg)',
-            backfaceVisibility: 'hidden',
-            WebkitBackfaceVisibility: 'hidden',
+            transform: preparing || (flipPhase === 'anim' && reduceMotion && !flipView)
+              ? `${FLIP_PERSPECTIVE} rotateY(-180deg)`
+              : undefined,
+            animation: flipPhase === 'anim' && !reduceMotion
+              ? `${flipView ? 'orch-face-back-in' : 'orch-face-back-away'} ${FLIP_MS}ms ${FLIP_EASE} ${flipDelay}ms both`
+              : undefined,
+            willChange: in3d ? 'transform' : undefined,
+            // While preparing, the back is drawn facing away but nearly
+            // transparent, which forces the browser to paint it now rather
+            // than mid-turn when it first comes into view.
+            backfaceVisibility: in3d && !preparing ? 'hidden' : undefined,
+            WebkitBackfaceVisibility: in3d && !preparing ? 'hidden' : undefined,
+            opacity: preparing ? 0.01 : undefined,
             borderRadius: 'var(--radius-lg)',
             overflow: 'hidden',
             border: `1px solid ${agent.color}40`,
@@ -580,8 +630,10 @@ export const AgentCard: React.FC<AgentCardProps> = React.memo(({ agent, onClose 
             color={agent.color}
             conflicts={conflicts}
             unread={report ? 0 : 0}
+            active={in3d}
           />
         </div>
+      </div>
       </div>
     </div>
   );

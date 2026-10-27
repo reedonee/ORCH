@@ -41,8 +41,6 @@ const App: React.FC = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
   // Shift+Tab pins the flip view open; plain Tab is press-and-hold.
   const flipPinnedRef = useRef(false);
-  // Mirrors the ref for rendering the "how to flip back" hint.
-  const [flipPinned, setFlipPinned] = useState(false);
   const flipView = useAppStore((s) => s.flipView);
   const isImage = theme.video.match(/\.(jpg|jpeg|png|gif|webp)$/i);
 
@@ -319,7 +317,6 @@ const App: React.FC = () => {
       if (e.key === 'Escape' && useAppStore.getState().flipView) {
         e.preventDefault();
         flipPinnedRef.current = false;
-        setFlipPinned(false);
         useAppStore.getState().setFlipView(false);
         return;
       }
@@ -344,12 +341,11 @@ const App: React.FC = () => {
           // knew, so a Shift+Tab left every card stuck face-down.
           if (flipPinnedRef.current && useAppStore.getState().flipView) {
             flipPinnedRef.current = false;
-            setFlipPinned(false);
             useAppStore.getState().setFlipView(false);
             return;
           }
           useAppStore.getState().setFlipView(true);
-          if (e.shiftKey) { flipPinnedRef.current = true; setFlipPinned(true); }
+          if (e.shiftKey) flipPinnedRef.current = true;
         }
         return;
       }
@@ -398,7 +394,6 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!flipView && flipPinnedRef.current) {
       flipPinnedRef.current = false;
-      setFlipPinned(false);
     }
   }, [flipView]);
 
@@ -407,7 +402,6 @@ const App: React.FC = () => {
   useEffect(() => {
     const onFlipBackRequest = () => {
       flipPinnedRef.current = false;
-      setFlipPinned(false);
       useAppStore.getState().setFlipView(false);
     };
     window.addEventListener('orch-flip-back', onFlipBackRequest);
@@ -509,25 +503,6 @@ const App: React.FC = () => {
         <Bug size={15} />
       </button>
       <ToastHost />
-
-      {/* While the cards show their backs, say how to turn them over. */}
-      {flipView && (
-        <div
-          role="status"
-          className="orch-flip-hint"
-          style={{
-            position: 'fixed', left: '50%', top: 64, transform: 'translateX(-50%)', zIndex: 9000,
-            padding: '7px 14px', borderRadius: 999, fontSize: 12, fontWeight: 600,
-            color: 'var(--text)', background: 'color-mix(in srgb, var(--bg) 82%, transparent)',
-            border: '1px solid var(--border)', boxShadow: '0 6px 24px rgba(0,0,0,0.35)',
-            pointerEvents: 'none', whiteSpace: 'nowrap',
-          }}
-        >
-          {flipPinned
-            ? 'Status view — press Tab, Esc or click a card to flip back'
-            : 'Status view — release Tab to flip back · Shift+Tab keeps it open'}
-        </div>
-      )}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
       {showWorkspace && <WorkspaceDialog onClose={() => setShowWorkspace(false)} />}
       {showAuth && <AuthDialog onClose={() => setShowAuth(false)} />}

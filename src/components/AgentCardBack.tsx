@@ -25,6 +25,9 @@ interface Props {
   /** Files this agent shares with another — surfaced prominently. */
   conflicts?: string[];
   unread?: number;
+  /** Showing (or turning). The back stays mounted while hidden so a flip
+   *  never starts by building it; while hidden its clock is paused. */
+  active?: boolean;
 }
 
 const PHASE_META: Record<AgentReport['phase'], {
@@ -51,7 +54,7 @@ function humanDuration(ms: number): string {
 }
 
 export const AgentCardBack: React.FC<Props> = ({
-  report, agentName, providerId, color, conflicts = [], unread = 0,
+  report, agentName, providerId, color, conflicts = [], unread = 0, active = true,
 }) => {
   // Elapsed time is derived in an effect, not during render: reading
   // the clock while rendering is impure (two renders disagree) and the
@@ -61,9 +64,10 @@ export const AgentCardBack: React.FC<Props> = ({
     if (!report || report.phase === 'idle') { setElapsed(null); return; }
     const tick = () => setElapsed(Date.now() - report.startedAt);
     tick();
+    if (!active) return;
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [report?.startedAt, report?.phase, report]);
+  }, [report?.startedAt, report?.phase, report, active]);
 
   const phase = report?.phase ?? 'idle';
   const meta = PHASE_META[phase];
@@ -88,17 +92,22 @@ export const AgentCardBack: React.FC<Props> = ({
           'linear-gradient(150deg, rgba(20,24,30,0.95) 0%, rgba(10,12,16,0.97) 100%)',
         ].join(', '),
         borderRadius: 'inherit',
-        boxShadow: '0 18px 50px rgba(0,0,0,0.45)',
       }}
       role="region"
       aria-label={`${agentName} status summary`}
     >
-      {/* Sheen that sweeps across as the card lands face-down. */}
-      <div aria-hidden="true" style={{
-        position: 'absolute', top: '-20%', bottom: '-20%', left: 0, width: '45%', pointerEvents: 'none',
-        background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.16), transparent)',
-        animation: 'orch-flip-sheen 900ms ease-out 420ms both',
-      }} />
+      {/* Sheen that sweeps across once the card has landed face-down.
+          Rendered per flip so it replays each time, with its layer created
+          up front (will-change): starting it mid-turn created that layer
+          on the edge-on frame and dropped frames there. */}
+      {active && (
+        <div aria-hidden="true" style={{
+          position: 'absolute', top: '-20%', bottom: '-20%', left: 0, width: '45%', pointerEvents: 'none',
+          background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.14), transparent)',
+          willChange: 'transform, opacity',
+          animation: 'orch-flip-sheen 1100ms cubic-bezier(0.4, 0, 0.2, 1) 820ms both',
+        }} />
+      )}
 
       {/* Header: who, and for how long */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}>

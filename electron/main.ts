@@ -8,6 +8,7 @@ import os from 'os';
 import { OrchMcpServer, type SyncEvent } from './mcp-server.js';
 import { mcpLaunchArgs, mcpLaunchEnv, CLI_REGISTERED_PROVIDERS, HERMES_ORCH_ENTRY } from './mcp-agent-config.js';
 import { inheritedAgentEnv } from './agent-env.js';
+import { TrustStore } from './trust-store.js';
 import { VoiceServer } from './voice-server.js';
 import {
   initLocalDb, getDbPath,
@@ -57,6 +58,13 @@ import {
 const sessions = new Map<string, PtySession>();
 /** Permission-prompt state per PTY session. See agent-approvals.ts. */
 const approvalTrackers = new Map<string, ApprovalTracker>();
+/** The folder each session was started in, for remembered folder trust. */
+const sessionCwds = new Map<string, string>();
+let trustStoreInstance: TrustStore | null = null;
+/** Created on first use: app.getPath needs the app to be ready. */
+function trustStore(): TrustStore {
+  return trustStoreInstance ??= new TrustStore(path.join(app.getPath('userData'), 'trusted-folders.json'));
+}
 const MAX_BUF_LINES = 2000;
 
 let mcpServer: OrchMcpServer | null = null;
@@ -863,6 +871,7 @@ function destroySession(sessionId: string, session: PtySession): void {
 
   if (approvalTrackers.get(sessionId)?.pending) sendApproval(session.agentId, null);
   approvalTrackers.delete(sessionId);
+  sessionCwds.delete(sessionId);
 
   if (mcpServer) {
     mcpServer.eventBus.unsubscribe(session.agentId);
@@ -1193,6 +1202,11 @@ function answerApproval(sessionId: string, decision: ApprovalDecision, by: 'user
   if (!keys) return false;
   logAgentEvent(session.agentId, session.name, session.providerId,
     decision === 'approve' ? 'approved' : 'denied', `${by}: ${tracker.pending.detail}`);
+  // The user trusting a folder is remembered for this agent type, so the
+  // same CLI is never asked about the same folder again.
+  if (by === 'user' && decision === 'approve' && tracker.pending.kind === 'trust') {
+    trustStore().remember(tracker.providerId, sessionCwds.get(sessionId));
+  }
   tracker.noteInput(keys);
   session.pty.write(keys);
   session.lastActivity = Date.now();
@@ -1204,6 +1218,20 @@ function trackApprovals(sessionId: string, rawChunk: string) {
   const tracker = approvalTrackers.get(sessionId);
   const found = tracker?.feed(rawChunk);
   if (!tracker || !found) return;
+  const cwd = sessionCwds.get(sessionId);
+  if (found.kind === 'trust') {
+    if (trustStore().isTrusted(tracker.providerId, cwd)) {
+      // Trusted before, by the user, for this agent type and folder.
+      setTimeout(() => {
+        if (tracker.pending?.since === found.since && tracker.stillLive()) answerApproval(sessionId, 'approve', 'auto');
+      }, 300);
+      return;
+    }
+    // Name the folder on the card instead of "trust this folder". A copy:
+    // the tracker compares against its own detail to spot repaints.
+    sendApproval(tracker.agentId, cwd ? { ...found, detail: cwd } : found);
+    return;
+  }
   if (shouldAutoApprove(tracker.mode, found)) {
     // Let the TUI finish painting the prompt first: a key that arrives
     // mid-render can be dropped, leaving the agent waiting on nobody.
@@ -1214,6 +1242,10 @@ function trackApprovals(sessionId: string, rawChunk: string) {
   }
   sendApproval(tracker.agentId, found);
 }
+
+ipcMain.handle('trust_list', async () => trustStore().list());
+ipcMain.handle('trust_forget', async (_event, { providerId, folder }) =>
+  ({ success: typeof providerId === 'string' && typeof folder === 'string' && trustStore().forget(providerId, folder) }));
 
 const isDecision = (d: unknown): d is ApprovalDecision => d === 'approve' || d === 'deny';
 const isMode = (m: unknown): m is ApprovalMode => m === 'auto' || m === 'manual';
@@ -1451,6 +1483,7 @@ ipcMain.handle('create_terminal', async (_event, { agentId, name, command, args,
       sessions.delete(sessionId);
       if (approvalTrackers.get(sessionId)?.pending) sendApproval(session.agentId, null);
       approvalTrackers.delete(sessionId);
+      sessionCwds.delete(sessionId);
       mcpServer?.recordAgentExit(session.agentId, exitCode ?? null);
       // Flush any remaining line buffer
       if (mcpServer && sessionLineBuffers[sessionId]?.trim()) {
@@ -1510,6 +1543,7 @@ ipcMain.handle('create_terminal', async (_event, { agentId, name, command, args,
     approvalTrackers.set(sessionId, new ApprovalTracker(
       session.agentId, name, session.providerId, isMode(approvalMode) ? approvalMode : 'manual',
     ));
+    sessionCwds.set(sessionId, cwd);
     openSessionLog(sessionId);
     // The banner was emitted before the log existed; record it now so the
     // transcript matches what the user actually saw.

@@ -9,7 +9,7 @@ import { useAuthStore } from '../stores/useAuthStore';
 import { useMusicPlayerStore } from '../stores/useMusicPlayerStore';
 import { X, Palette, Layout, Keyboard, Mic, Bot, Key, Plug, User, Grid3X3, Theater, Crosshair, Columns2, Rows3, Share2, Volume2 } from 'lucide-react';
 import { VisualThemeEngine } from './VisualThemeEngine';
-import { getMcpUrl, installProvider, onInstallProgress, voiceModelStatus, voiceConfigure, voiceSpeak } from '../lib/electron-api';
+import { getMcpUrl, installProvider, onInstallProgress, voiceModelStatus, voiceConfigure, voiceSpeak, invoke } from '../lib/electron-api';
 import { PROVIDER_ICONS } from './icons/ProviderIcon';
 import type { ProviderStatus } from '../types/provider';
 import type { AgentProvider } from '../types/settings';
@@ -468,6 +468,49 @@ const ShortcutsSection: React.FC = () => {
 
 // ── Agents ────────────────────────────────────────────────────────
 
+/** Folders the user trusted once for an agent type; ORCH answers that
+ *  agent's "trust this folder?" prompt there automatically. */
+const TrustedFolders: React.FC = () => {
+  const [entries, setEntries] = useState<Array<{ providerId: string; folder: string }> | null>(null);
+  const refresh = useCallback(() => {
+    invoke<Array<{ providerId: string; folder: string }>>('trust_list').then(setEntries).catch(() => setEntries([]));
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+  if (!entries || entries.length === 0) return null;
+  return (
+    <div style={{
+      padding: '12px 16px', borderRadius: 'var(--radius-md)',
+      background: 'var(--surface)', border: '1px solid var(--border-dim)',
+      display: 'flex', flexDirection: 'column', gap: 6,
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 600 }}>Trusted folders</div>
+      <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+        You trusted these once; ORCH answers that agent&apos;s folder-trust prompt there for you.
+      </div>
+      {entries.map(({ providerId, folder }) => (
+        <div key={`${providerId}:${folder}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5 }}>
+          <span style={{
+            fontSize: 9, textTransform: 'uppercase', letterSpacing: 0.8, color: 'var(--text-muted)',
+            padding: '1px 6px', border: '1px solid var(--border-dim)', borderRadius: 999, flexShrink: 0,
+          }}>{providerId}</span>
+          <span title={folder} style={{
+            flex: 1, minWidth: 0, fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>{folder}</span>
+          <button
+            onClick={() => { void invoke('trust_forget', { providerId, folder }).then(refresh); }}
+            style={{
+              padding: '3px 10px', fontSize: 11, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+              border: '1px solid var(--border)', background: 'transparent', color: 'var(--text)', fontFamily: 'inherit',
+            }}
+          >
+            Forget
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+};
+
 const AgentsSection: React.FC = () => {
   const { providers } = useSettingsStore();
   const defaultApprovalMode = useSettingsStore((s) => s.defaultApprovalMode);
@@ -527,7 +570,7 @@ const AgentsSection: React.FC = () => {
           <div style={{ fontSize: 13, fontWeight: 600 }}>Auto-approve new agents</div>
           <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>
             Off: agents ask before running tools, and ORCH shows the request on the card and says it aloud.
-            Each agent can be switched from its card. Folder trust always asks.
+            Each agent can be switched from its card. Folder trust is asked once per agent type and folder.
           </div>
         </div>
         <Toggle
@@ -535,6 +578,7 @@ const AgentsSection: React.FC = () => {
           onChange={(v) => setDefaultApprovalMode(v ? 'auto' : 'manual')}
         />
       </div>
+      <TrustedFolders />
       {agentProviders.map((p) => {
         const status = statuses[p.id];
         const isAvailable = status?.available;

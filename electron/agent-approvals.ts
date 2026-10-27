@@ -85,23 +85,27 @@ interface PromptSpec {
   options: RegExp;
 }
 
+// Questions may be word-wrapped across lines: a CLI in a narrow card
+// breaks "…a project you / created or one you trust?" over two lines, and
+// a pattern that required one line never saw the prompt at all. So words
+// are separated by \s+ and the free text may span lines (bounded).
 const SPECS: Record<string, PromptSpec[]> = {
   'claude-code': [
     {
       kind: 'tool',
-      question: /Do you want to [^?\n]{1,200}\?/g,
+      question: /Do\s+you\s+want\s+to\s[^?]{1,200}\?/g,
       options: /No, and tell Claude what to do differently|\b1\.\s*Yes\b/,
     },
     {
       kind: 'trust',
-      question: /Is this a project you created or one you trust\?/g,
-      options: /Yes, I trust this folder/,
+      question: /Is\s+this\s+a\s+project\s+you\s+created\s+or\s+one\s+you\s+trust\?/g,
+      options: /Yes,\s+I\s+trust\s+this\s+folder/,
     },
   ],
   'codex': [
     {
       kind: 'tool',
-      question: /(?:Would you like to [^?\n]{1,200}\?|Do you want to approve network access to [^\n]{1,200})/g,
+      question: /(?:Would\s+you\s+like\s+to\s[^?]{1,200}\?|Do\s+you\s+want\s+to\s+approve\s+network\s+access\s+to\s[^\n]{1,200})/g,
       options: /Yes, proceed|Yes, just this once|No, and tell Codex what to do differently/,
     },
   ],

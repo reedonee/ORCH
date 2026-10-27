@@ -99,6 +99,19 @@ eq('colours and titles stripped', terminalText('\x1b]0;title\x07\x1b[38;2;1;2;3m
   eq('a live pending prompt reports stillLive', t2.stillLive(), true);
 }
 
+// ── Word-wrapped prompts (narrow cards) ─────────────────────
+// A CLI in a narrow card wraps its question over lines; requiring it on
+// one line meant the prompt was never seen.
+{
+  const trust = 'Accessing workspace:\n\nC:\\Users\\me\n\nQuick safety check: Is this a project you\ncreated or one you trust? (Like your own\ncode.)\n\n❯ No, exit\n  Yes, I trust this folder\n\nEnter to confirm · Esc to cancel\n';
+  eq('wrapped trust prompt is recognised',
+    detectApprovalPrompt('claude-code', trust),
+    { kind: 'trust', question: 'Is this a project you created or one you trust?', detail: 'trust this folder' });
+  const edit = 'Edit file\nsrc/components/AgentCard.tsx\nDo you want to make this edit to\nAgentCard.tsx?\n❯ 1. Yes\n  2. Yes, allow all edits\n  3. No\n';
+  eq('wrapped edit question is recognised, as one line',
+    detectApprovalPrompt('claude-code', edit)?.detail, 'make this edit to AgentCard.tsx');
+}
+
 // ── Not a prompt ────────────────────────────────────────────
 eq('question without options is just text',
   detectApprovalPrompt('claude-code', 'I can refactor this. Do you want to proceed?\nLet me know.'), null);
